@@ -1,0 +1,3 @@
+[python]
+# Adiciona a pasta src ao PYTHONPATH
+path = "src"
