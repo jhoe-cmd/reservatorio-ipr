@@ -1,3 +1,7 @@
+import sys
+import os
+# Estas linhas abaixo garantem que o Python ache a pasta 'src'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
