@@ -4,3 +4,4 @@ matplotlib
 scipy
 pydantic
 pint
+scikit-learn
