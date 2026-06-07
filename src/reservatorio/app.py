@@ -28,26 +28,32 @@ st.sidebar.subheader("Dados de Teste (Separador)")
 pwf_str = st.sidebar.text_input("Pressões de Fundo (Pwf)", value="3500, 3000, 2500, 1500")
 q_str = st.sidebar.text_input("Vazões Correspondentes (Q)", value="800, 1550, 2200, 3100")
 
-st.sidebar.subheader("Chutes Iniciais (Otimização)")
+# --- NOVA SEÇÃO: Otimização e Parâmetros (Com a trava da Psat) ---
+st.sidebar.subheader("Otimização e Parâmetros")
 j_guess = st.sidebar.number_input("Índice J Inicial", value=1.5, step=0.1)
-psat_guess = st.sidebar.number_input("Pressão Psat Inicial", value=2000.0, step=100.0)
+
+travar_psat = st.sidebar.checkbox("Travar Psat (Dado de Laboratório/PVT)")
+if travar_psat:
+    psat_conhecida = st.sidebar.number_input("Pressão Psat Conhecida (psi)", value=3000.0, step=100.0)
+    psat_guess = psat_conhecida # Fallback pro gráfico
+else:
+    psat_guess = st.sidebar.number_input("Pressão Psat Inicial (Chute)", value=2000.0, step=100.0)
+    psat_conhecida = None
 
 st.sidebar.subheader("Configurações de Saída")
 unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d", "L/d"], horizontal=True)
 
-# Define o fator de conversão (a matemática roda em bbl/d como base)
 if unidade_vazao == "bbl/d":
     fator_conv = 1.0
 elif unidade_vazao == "m³/d":
     fator_conv = 0.158987
-else: # L/d
+else: 
     fator_conv = 158.987
 
 # 3. Botão de Execução
 if st.sidebar.button("Rodar Simulação", type="primary"):
     with st.spinner("Processando algoritmos de otimização e Monte Carlo..."):
         try:
-            # Processamento dos dados de entrada
             pwf_campo = np.array([float(x.strip()) for x in pwf_str.split(',')])
             q_campo = np.array([float(x.strip()) for x in q_str.split(',')])
             
@@ -55,21 +61,20 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 st.error("Erro: A quantidade de pressões e vazões deve ser exatamente igual!")
                 st.stop()
 
-            # Instanciação dos serviços
             repo = JsonCalibrationRepository()
             calibrador = HistoryMatchingService(strategy=DarcyVogelCalibration(), repository=repo)
 
-            # Execução da Calibração
+            # Execução da Calibração com a nova variável Psat_conhecida
             res_calibracao = calibrador.calibrar(
                 well_name=well_name,
                 pwf_medidos=pwf_campo,
                 q_medidos=q_campo,
                 Pe=pe_campo,
                 J_guess=j_guess,
-                Psat_guess=psat_guess
+                Psat_guess=psat_guess,
+                Psat_conhecida=psat_conhecida # <-- NOVA INTEGRAÇÃO
             )
 
-            # Execução do Monte Carlo
             simulador_mc = MonteCarloIPR()
             risco = simulador_mc.run(
                 pe_dist=NormalDistribution(mean=pe_campo, std=pe_campo*0.05),
@@ -78,21 +83,21 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 n_simulations=50000
             )
 
-            # 4. Apresentação Visual dos Resultados
             st.subheader(f"Resultados da Calibração: {well_name}")
             col1, col2, col3 = st.columns(3)
             col1.metric("Índice J Calibrado", f"{res_calibracao.J_calibrado:.3f} STB/d/psi")
-            col2.metric("Psat Calibrada", f"{res_calibracao.Psat_calibrado:.1f} psi")
+            
+            # Ajuste visual: Mostra se a Psat foi calibrada pelo software ou travada pelo usuário
+            label_psat = "Psat Travada (PVT)" if travar_psat else "Psat Calibrada"
+            col2.metric(label_psat, f"{res_calibracao.Psat_calibrado:.1f} psi")
             col3.metric("Erro (RMSE)", f"{getattr(res_calibracao, 'rmse', 0.0):.2f}")
 
             st.subheader("Análise de Risco Estocástica (AOF)")
             col4, col5, col6 = st.columns(3)
-            # Aplicando a conversão nas métricas
             col4.metric("P90 (Conservador)", f"{risco['P90_Conservador'] * fator_conv:.0f} {unidade_vazao}")
             col5.metric("P50 (Esperado)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
             col6.metric("P10 (Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
 
-            # Plotagem do Gráfico na Interface
             modelo = DarcyVogelHibridoIPR()
             class MockPoco:
                 Pe = pe_campo
@@ -102,7 +107,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 
             q_arr, pwf_arr, _, aof = modelo.calcular_curva(MockPoco(), J_in=res_calibracao.J_calibrado)
 
-            # Aplicando a conversão para o gráfico principal
             q_arr_plot = q_arr * fator_conv
             q_campo_plot = q_campo * fator_conv
             aof_plot = aof * fator_conv
@@ -120,12 +124,10 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             
             st.pyplot(fig) 
 
-            # --- NOVA SEÇÃO: DIAGNÓSTICO DE INCERTEZA ---
             st.markdown("---")
             st.subheader("🔍 Diagnóstico de Incerteza e Identificabilidade")
 
             with st.spinner("Gerando topografia de erro e analisando condicionamento..."):
-                # 1. Chama a nova função de diagnóstico
                 diag = generate_rmse_surface(
                     pwf_medidos=pwf_campo, 
                     q_medidos=q_campo,     
@@ -134,7 +136,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     Psat_opt=res_calibracao.Psat_calibrado
                 )
 
-                # 2. Painel Automático de Saúde da Calibração
                 col_diag1, col_diag2 = st.columns(2)
                 
                 with col_diag1:
@@ -155,7 +156,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     else:
                         st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal condicionado)")
 
-                # 3. Plotagem do Mapa de Contorno RMSE (Este gráfico continua usando J original, que é padrão STB/d/psi)
                 fig_map, ax_map = plt.subplots(figsize=(8, 6))
 
                 cp = ax_map.contourf(
@@ -174,6 +174,10 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     marker='*', color='white', s=300, edgecolors='black', 
                     label=f'Ótimo (RMSE: {diag["rmse_min"]:.1f} psi)'
                 )
+
+                # --- NOVO: Linha horizontal de corte indicando a restrição da Psat ---
+                if travar_psat:
+                    ax_map.axhline(y=psat_conhecida, color='white', linestyle='-', linewidth=2, label=f'Psat Travada ({psat_conhecida} psi)')
 
                 ax_map.set_title("Superfície de Erro: $RMSE = f(J, P_{sat})$", fontweight='bold')
                 ax_map.set_xlabel('Índice de Produtividade - J (STB/d/psi)', fontweight='bold')
