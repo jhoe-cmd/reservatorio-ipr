@@ -32,6 +32,17 @@ st.sidebar.subheader("Chutes Iniciais (Otimização)")
 j_guess = st.sidebar.number_input("Índice J Inicial", value=1.5, step=0.1)
 psat_guess = st.sidebar.number_input("Pressão Psat Inicial", value=2000.0, step=100.0)
 
+st.sidebar.subheader("Configurações de Saída")
+unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d", "L/d"], horizontal=True)
+
+# Define o fator de conversão (a matemática roda em bbl/d como base)
+if unidade_vazao == "bbl/d":
+    fator_conv = 1.0
+elif unidade_vazao == "m³/d":
+    fator_conv = 0.158987
+else: # L/d
+    fator_conv = 158.987
+
 # 3. Botão de Execução
 if st.sidebar.button("Rodar Simulação", type="primary"):
     with st.spinner("Processando algoritmos de otimização e Monte Carlo..."):
@@ -76,9 +87,10 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
 
             st.subheader("Análise de Risco Estocástica (AOF)")
             col4, col5, col6 = st.columns(3)
-            col4.metric("P90 (Conservador)", f"{risco['P90_Conservador']:.0f} bbl/d")
-            col5.metric("P50 (Esperado)", f"{risco['P50_Esperado']:.0f} bbl/d")
-            col6.metric("P10 (Otimista)", f"{risco['P10_Otimista']:.0f} bbl/d")
+            # Aplicando a conversão nas métricas
+            col4.metric("P90 (Conservador)", f"{risco['P90_Conservador'] * fator_conv:.0f} {unidade_vazao}")
+            col5.metric("P50 (Esperado)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
+            col6.metric("P10 (Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
 
             # Plotagem do Gráfico na Interface
             modelo = DarcyVogelHibridoIPR()
@@ -90,14 +102,19 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 
             q_arr, pwf_arr, _, aof = modelo.calcular_curva(MockPoco(), J_in=res_calibracao.J_calibrado)
 
+            # Aplicando a conversão para o gráfico principal
+            q_arr_plot = q_arr * fator_conv
+            q_campo_plot = q_campo * fator_conv
+            aof_plot = aof * fator_conv
+
             fig, ax = plt.subplots(figsize=(10, 5))
-            ax.plot(q_arr, pwf_arr, 'b-', linewidth=2, label=f'IPR Calibrada (AOF: {aof:.0f})')
-            ax.scatter(q_campo, pwf_campo, color='red', zorder=5, label='Dados de Teste')
+            ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=2, label=f'IPR Calibrada (AOF: {aof_plot:.0f})')
+            ax.scatter(q_campo_plot, pwf_campo, color='red', zorder=5, label='Dados de Teste')
             ax.set_title(f'Curva IPR - {well_name}', fontweight='bold')
-            ax.set_xlabel('Vazão (STB/dia)', fontweight='bold')
+            ax.set_xlabel(f'Vazão ({unidade_vazao})', fontweight='bold')
             ax.set_ylabel('Pressão de Fundo - Pwf (psi)', fontweight='bold')
             ax.set_ylim(0, pe_campo + 500)
-            ax.set_xlim(0, aof * 1.1)
+            ax.set_xlim(0, aof_plot * 1.1)
             ax.grid(True, linestyle='--')
             ax.legend()
             
@@ -108,7 +125,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             st.subheader("🔍 Diagnóstico de Incerteza e Identificabilidade")
 
             with st.spinner("Gerando topografia de erro e analisando condicionamento..."):
-                # 1. Chama a nova função de diagnóstico (com as variáveis corretas)
+                # 1. Chama a nova função de diagnóstico
                 diag = generate_rmse_surface(
                     pwf_medidos=pwf_campo, 
                     q_medidos=q_campo,     
@@ -138,7 +155,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     else:
                         st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal condicionado)")
 
-                # 3. Plotagem do Mapa de Contorno RMSE
+                # 3. Plotagem do Mapa de Contorno RMSE (Este gráfico continua usando J original, que é padrão STB/d/psi)
                 fig_map, ax_map = plt.subplots(figsize=(8, 6))
 
                 cp = ax_map.contourf(
