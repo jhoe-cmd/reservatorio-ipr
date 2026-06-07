@@ -10,7 +10,7 @@ from reservatorio.domain.ipr_models import DarcyVogelHibridoIPR
 from reservatorio.domain.calibration import DarcyVogelCalibration
 from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
 from reservatorio.infrastructure.repositories import JsonCalibrationRepository
-from reservatorio.application.optimization import HistoryMatchingService
+from reservatorio.application.optimization import HistoryMatchingService, generate_rmse_surface
 from reservatorio.application.montecarlo import MonteCarloIPR
 
 # 1. Configuração da Página Web
@@ -101,7 +101,70 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             ax.grid(True, linestyle='--')
             ax.legend()
             
-            st.pyplot(fig) # Comando mágico do Streamlit para exibir o gráfico Matplotlib
+            st.pyplot(fig) 
+
+            # --- NOVA SEÇÃO: DIAGNÓSTICO DE INCERTEZA ---
+            st.markdown("---")
+            st.subheader("🔍 Diagnóstico de Incerteza e Identificabilidade")
+
+            with st.spinner("Gerando topografia de erro e analisando condicionamento..."):
+                # 1. Chama a nova função de diagnóstico (com as variáveis corretas)
+                diag = generate_rmse_surface(
+                    pwf_medidos=pwf_campo, 
+                    q_medidos=q_campo,     
+                    Pe=pe_campo,
+                    J_opt=res_calibracao.J_calibrado,
+                    Psat_opt=res_calibracao.Psat_calibrado
+                )
+
+                # 2. Painel Automático de Saúde da Calibração
+                col_diag1, col_diag2 = st.columns(2)
+                
+                with col_diag1:
+                    if diag["area_incerteza_pct"] < 5.0:
+                        st.success(f"✅ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Solução Robusta)")
+                    elif diag["area_incerteza_pct"] < 20.0:
+                        st.warning(f"⚠️ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Atenção)")
+                    else:
+                        st.error(f"🚨 **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Baixa Identificabilidade)")
+                        
+                with col_diag2:
+                    if np.isnan(diag["condicionamento_ci"]):
+                        st.error("🚨 **Condicionamento (CI):** Indefinido (Matriz singular/sem dados válidos)")
+                    elif diag["condicionamento_ci"] < 10:
+                        st.success(f"✅ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Bem condicionado)")
+                    elif diag["condicionamento_ci"] < 50:
+                        st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Vale alongado)")
+                    else:
+                        st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal condicionado)")
+
+                # 3. Plotagem do Mapa de Contorno RMSE
+                fig_map, ax_map = plt.subplots(figsize=(8, 6))
+
+                cp = ax_map.contourf(
+                    diag['J_grid'], diag['Psat_grid'], diag['RMSE_grid'], 
+                    levels=30, cmap='viridis_r', extend='max'
+                )
+                fig_map.colorbar(cp, label='RMSE (psi)')
+
+                ax_map.contour(
+                    diag['J_grid'], diag['Psat_grid'], diag['RMSE_grid'], 
+                    levels=[diag['limiar_incerteza']], colors='red', linewidths=2, linestyles='dashed'
+                )
+
+                ax_map.scatter(
+                    [res_calibracao.J_calibrado], [res_calibracao.Psat_calibrado], 
+                    marker='*', color='white', s=300, edgecolors='black', 
+                    label=f'Ótimo (RMSE: {diag["rmse_min"]:.1f} psi)'
+                )
+
+                ax_map.set_title("Superfície de Erro: $RMSE = f(J, P_{sat})$", fontweight='bold')
+                ax_map.set_xlabel('Índice de Produtividade - J (STB/d/psi)', fontweight='bold')
+                ax_map.set_ylabel('Pressão de Saturação - Psat (psi)', fontweight='bold')
+                ax_map.legend()
+                ax_map.grid(True, linestyle=':', alpha=0.6)
+
+                st.pyplot(fig_map)
 
         except Exception as e:
             st.error(f"Ocorreu um erro na simulação matemática: {e}")
