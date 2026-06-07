@@ -69,7 +69,6 @@ def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n
     J_grid, Psat_grid = np.meshgrid(J_vals, Psat_vals)
     
     MSE_grid = np.zeros_like(J_grid)
-    # 1. Máscara explícita para acumular violações físicas ou numéricas
     invalid_mask = np.zeros_like(J_grid, dtype=bool)
 
     for pwf_real, q_real in zip(pwf_medidos, q_medidos):
@@ -90,7 +89,6 @@ def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n
         
         delta = b**2 - 4*a*c
         
-        # Atualiza a máscara de invalidade global para células com delta negativo
         invalid_mask[mask_vogel] |= (delta < 0)
         
         mask_valid_delta = delta >= 0
@@ -101,20 +99,24 @@ def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n
         
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            x_valid = np.where((x1 >= 0) & (x1 <= 1), x1,
+            # Calcula as raízes apenas para o array encolhido (válido)
+            x_valid_partial = np.where((x1 >= 0) & (x1 <= 1), x1,
                                np.where((x2 >= 0) & (x2 <= 1), x2, np.nan))
         
-        # Atualiza a máscara de invalidade global se nenhuma raiz for fisicamente possível
-        invalid_mask[mask_vogel] |= np.isnan(x_valid)
+        # --- CORREÇÃO DO BROADCASTING AQUI ---
+        # Remonta o array para o tamanho original do mask_vogel usando NaN como preenchimento
+        x_valid_full = np.full_like(delta, np.nan)
+        x_valid_full[mask_valid_delta] = x_valid_partial
+        
+        # Agora os tamanhos são compatíveis (2247,) com (2247,)
+        invalid_mask[mask_vogel] |= np.isnan(x_valid_full)
         
         pwf_vogel_valid = np.full_like(delta, np.nan)
-        pwf_vogel_valid[mask_valid_delta] = Psat_grid[mask_vogel][mask_valid_delta] * x_valid
+        pwf_vogel_valid[mask_valid_delta] = Psat_grid[mask_vogel][mask_valid_delta] * x_valid_partial
         pwf_calc[mask_vogel] = pwf_vogel_valid
         
-        # Acumula o erro apenas onde ainda é válido
         MSE_grid[~invalid_mask] += (pwf_real - pwf_calc[~invalid_mask])**2
 
-    # Aplicação final da máscara explícita
     RMSE_grid = np.sqrt(MSE_grid / len(q_medidos))
     RMSE_grid[invalid_mask] = np.nan
 
@@ -125,13 +127,11 @@ def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n
     mask_incerteza = (RMSE_grid <= limiar_incerteza) & mask_valid_domain
     area_incerteza_pct = (np.sum(mask_incerteza) / np.sum(mask_valid_domain)) * 100
 
-    # 2 & 5. Análise de Condicionamento via Autovalores da Covariância
     j_incerteza = J_grid[mask_incerteza]
     psat_incerteza = Psat_grid[mask_incerteza]
     
     condicionamento_ci = np.nan
     if len(j_incerteza) > 2:
-        # Normalização necessária devido à diferença de escala entre J e Psat
         j_norm = (j_incerteza - np.mean(j_incerteza)) / (np.std(j_incerteza) + 1e-8)
         psat_norm = (psat_incerteza - np.mean(psat_incerteza)) / (np.std(psat_incerteza) + 1e-8)
         
@@ -141,7 +141,7 @@ def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n
         if len(eigenvalues) == 2:
             lambda_max = np.max(eigenvalues)
             lambda_min = np.min(eigenvalues)
-            if lambda_min > 1e-8: # Evita divisão por zero
+            if lambda_min > 1e-8:
                 condicionamento_ci = lambda_max / lambda_min
 
     return {
