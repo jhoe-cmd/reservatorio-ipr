@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import numpy as np
+import pandas as pd  # <-- Nova importação para manipular o relatório
 import matplotlib.pyplot as plt
 
 from reservatorio.domain.ipr_models import DarcyVogelHibridoIPR
@@ -21,21 +22,20 @@ st.markdown("Plataforma de **History Matching** e **Análise de Risco (Monte Car
 
 # 2. Barra Lateral (Inputs do Usuário)
 st.sidebar.header("Parâmetros do Poço")
-well_name = st.sidebar.text_input("Nome do Poço", value="Poço Alpha")
-pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=4000.0, step=100.0)
+well_name = st.sidebar.text_input("Nome do Poço", value="Pré-Sal Santos 01")
+pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=6200.0, step=100.0)
 
 st.sidebar.subheader("Dados de Teste (Separador)")
-pwf_str = st.sidebar.text_input("Pressões de Fundo (Pwf)", value="3500, 3000, 2500, 1500")
-q_str = st.sidebar.text_input("Vazões Correspondentes (Q)", value="800, 1550, 2200, 3100")
+pwf_str = st.sidebar.text_input("Pressões de Fundo (Pwf)", value="5800, 5200, 4800, 4100")
+q_str = st.sidebar.text_input("Vazões Correspondentes (Q)", value="2100, 5300, 7550, 10200")
 
-# --- NOVA SEÇÃO: Otimização e Parâmetros (Com a trava da Psat) ---
 st.sidebar.subheader("Otimização e Parâmetros")
 j_guess = st.sidebar.number_input("Índice J Inicial", value=1.5, step=0.1)
 
 travar_psat = st.sidebar.checkbox("Travar Psat (Dado de Laboratório/PVT)")
 if travar_psat:
-    psat_conhecida = st.sidebar.number_input("Pressão Psat Conhecida (psi)", value=3000.0, step=100.0)
-    psat_guess = psat_conhecida # Fallback pro gráfico
+    psat_conhecida = st.sidebar.number_input("Pressão Psat Conhecida (psi)", value=4500.0, step=100.0)
+    psat_guess = psat_conhecida 
 else:
     psat_guess = st.sidebar.number_input("Pressão Psat Inicial (Chute)", value=2000.0, step=100.0)
     psat_conhecida = None
@@ -64,7 +64,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             repo = JsonCalibrationRepository()
             calibrador = HistoryMatchingService(strategy=DarcyVogelCalibration(), repository=repo)
 
-            # Execução da Calibração com a nova variável Psat_conhecida
             res_calibracao = calibrador.calibrar(
                 well_name=well_name,
                 pwf_medidos=pwf_campo,
@@ -72,7 +71,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 Pe=pe_campo,
                 J_guess=j_guess,
                 Psat_guess=psat_guess,
-                Psat_conhecida=psat_conhecida # <-- NOVA INTEGRAÇÃO
+                Psat_conhecida=psat_conhecida 
             )
 
             simulador_mc = MonteCarloIPR()
@@ -87,7 +86,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             col1, col2, col3 = st.columns(3)
             col1.metric("Índice J Calibrado", f"{res_calibracao.J_calibrado:.3f} STB/d/psi")
             
-            # Ajuste visual: Mostra se a Psat foi calibrada pelo software ou travada pelo usuário
             label_psat = "Psat Travada (PVT)" if travar_psat else "Psat Calibrada"
             col2.metric(label_psat, f"{res_calibracao.Psat_calibrado:.1f} psi")
             col3.metric("Erro (RMSE)", f"{getattr(res_calibracao, 'rmse', 0.0):.2f}")
@@ -175,7 +173,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     label=f'Ótimo (RMSE: {diag["rmse_min"]:.1f} psi)'
                 )
 
-                # --- NOVO: Linha horizontal de corte indicando a restrição da Psat ---
                 if travar_psat:
                     ax_map.axhline(y=psat_conhecida, color='white', linestyle='-', linewidth=2, label=f'Psat Travada ({psat_conhecida} psi)')
 
@@ -186,6 +183,57 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 ax_map.grid(True, linestyle=':', alpha=0.6)
 
                 st.pyplot(fig_map)
+
+            # --- NOVA SEÇÃO: FASE 3 - EXPORTAÇÃO DE RELATÓRIO ---
+            st.markdown("---")
+            st.subheader("📥 Exportar Resultados")
+            
+            # 1. Estruturando os dados em um dicionário
+            dados_relatorio = {
+                "Parâmetro": [
+                    "Nome do Poço",
+                    "Pressão Estática (Pe) [psi]",
+                    "Índice de Produtividade (J) [STB/d/psi]",
+                    "Pressão de Saturação (Psat) [psi]",
+                    "Status da Psat",
+                    "Erro da Calibração (RMSE) [psi]",
+                    f"AOF (Potencial Máximo) [{unidade_vazao}]",
+                    f"P90 (Conservador) [{unidade_vazao}]",
+                    f"P50 (Esperado) [{unidade_vazao}]",
+                    f"P10 (Otimista) [{unidade_vazao}]",
+                    "Área de Incerteza [%]",
+                    "Condicionamento (CI)"
+                ],
+                "Valor": [
+                    well_name,
+                    f"{pe_campo:.2f}",
+                    f"{res_calibracao.J_calibrado:.4f}",
+                    f"{res_calibracao.Psat_calibrado:.2f}",
+                    "Travada (Laboratório/PVT)" if travar_psat else "Calibrada Numericamente",
+                    f"{diag['rmse_min']:.2f}",
+                    f"{aof_plot:.2f}",
+                    f"{risco['P90_Conservador'] * fator_conv:.2f}",
+                    f"{risco['P50_Esperado'] * fator_conv:.2f}",
+                    f"{risco['P10_Otimista'] * fator_conv:.2f}",
+                    f"{diag['area_incerteza_pct']:.2f}",
+                    f"{diag['condicionamento_ci']:.2f}" if not np.isnan(diag['condicionamento_ci']) else "Indefinido"
+                ]
+            }
+
+            # 2. Convertendo para DataFrame Pandas
+            df_relatorio = pd.DataFrame(dados_relatorio)
+
+            # 3. Gerando o CSV com codificação pt-BR (excel brasileiro)
+            csv = df_relatorio.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
+
+            # 4. Botão de Download na Interface
+            st.download_button(
+                label=f"📄 Baixar Relatório - {well_name} (CSV)",
+                data=csv,
+                file_name=f"relatorio_ipr_{well_name.replace(' ', '_').lower()}.csv",
+                mime="text/csv",
+                type="primary"
+            )
 
         except Exception as e:
             st.error(f"Ocorreu um erro na simulação matemática: {e}")
