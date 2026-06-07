@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+import warnings
 from scipy.optimize import least_squares
 from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error
 from reservatorio.domain.calibration import CalibrationStrategy
@@ -13,19 +14,36 @@ class HistoryMatchingService:
         self.strategy = strategy
         self.repository = repository
 
-    def calibrar(self, well_name: str, pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float, J_guess: float, Psat_guess: float) -> CalibrationResult:
+    def calibrar(self, well_name: str, pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float, J_guess: float, Psat_guess: float, Psat_conhecida: float = None) -> CalibrationResult:
         if len(pwf_medidos) < 3:
             raise ValueError("Calibração multiparâmetro exige pelo menos 3 pontos de teste.")
 
-        resultado = least_squares(
-            self.strategy.residuals,
-            x0=[J_guess, Psat_guess],
-            args=(pwf_medidos, q_medidos, Pe),
-            bounds=([1e-5, 1e-5], [np.inf, Pe]),
-            method='trf'
-        )
-        
-        J_opt, Psat_opt = resultado.x
+        if Psat_conhecida is not None:
+            # Otimização 1D: Apenas J é variável. Psat é cravada com dado PVT.
+            def residuals_1d(j_array, pwf, q, pe):
+                # Passa um array [J_atual, Psat_fixa] para a estratégia original
+                return self.strategy.residuals([j_array[0], Psat_conhecida], pwf, q, pe)
+
+            resultado = least_squares(
+                residuals_1d,
+                x0=[J_guess],
+                args=(pwf_medidos, q_medidos, Pe),
+                bounds=([1e-5], [np.inf]),
+                method='trf'
+            )
+            J_opt = resultado.x[0]
+            Psat_opt = Psat_conhecida
+        else:
+            # Otimização 2D Original: Busca J e Psat simultaneamente
+            resultado = least_squares(
+                self.strategy.residuals,
+                x0=[J_guess, Psat_guess],
+                args=(pwf_medidos, q_medidos, Pe),
+                bounds=([1e-5, 1e-5], [np.inf, Pe]),
+                method='trf'
+            )
+            J_opt, Psat_opt = resultado.x
+            
         residuos_finais = resultado.fun
         q_preditos = q_medidos + residuos_finais
         
@@ -54,9 +72,10 @@ class HistoryMatchingService:
         self.repository.save(result)
         logger.info(f"[{well_name}] Calibração salva. J: {J_opt:.3f} | RMSE: {rmse:.2f}")
         return result
-    #inserção de trecho de codigo:
-    import numpy as np
-import warnings
+
+# ==============================================================================
+# NOVA FUNÇÃO DE DIAGNÓSTICO (Superfície RMSE)
+# ==============================================================================
 
 def generate_rmse_surface(pwf_medidos, q_medidos, Pe, J_opt, Psat_opt, n_j=50, n_psat=50, delta_psi=5.0):
     j_min = max(0.1, J_opt * 0.5)
