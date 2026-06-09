@@ -1,37 +1,53 @@
-from abc import ABC, abstractmethod
-import numpy as np
-import numpy.typing as npt
-from typing import Tuple, Union
-from .models import PocoFisico
-from reservatorio.config import ReservoirConstants
+fimport numpy as np
 
-ArrayLike = Union[float, np.floating, npt.NDArray[np.float64]]
+class ModelosIPR:
+    """
+    Camada de Domínio: Contém as leis físicas de escoamento.
+    Nenhuma dependência de interface gráfica (Streamlit) deve entrar aqui.
+    """
 
-def fator_vogel_math(pwf: ArrayLike, psat: float) -> ArrayLike:
-    return (1.0 - 0.2 * (pwf / psat) - 0.8 * (pwf / psat)**2) / ReservoirConstants.VOGEL_CONSTANT
+    @staticmethod
+    def darcy_linear(pwf, pe, j):
+        """Modelo linear para regime monofásico."""
+        # Garante que não haja vazão negativa se Pwf > Pe
+        drawdown = np.maximum(0, pe - pwf)
+        return j * drawdown
 
-class IPRStrategy(ABC):
-    @abstractmethod
-    def calcular_curva(self, poco: PocoFisico, J_in: float = None) -> Tuple[np.ndarray, np.ndarray, float, float]:
-        pass
+    @staticmethod
+    def vogel_classico(pwf, pe, qmax):
+        """Modelo de Vogel para reservatórios saturados (Pe <= Psat)."""
+        ratio = pwf / pe
+        # Evita vazão negativa para Pwf > Pe
+        ratio = np.clip(ratio, 0, 1)
+        return qmax * (1 - 0.2 * ratio - 0.8 * (ratio**2))
 
-class DarcyVogelHibridoIPR(IPRStrategy):
-    def calcular_curva(self, poco: PocoFisico, J_in: float = None) -> Tuple[np.ndarray, np.ndarray, float, float]:
-        J_ipr = J_in if J_in is not None else (
-            poco.q_test / (poco.Pe - poco.Pwf_test) if poco.Pwf_test >= poco.Psat 
-            else poco.q_test / ((poco.Pe - poco.Psat) + poco.Psat * fator_vogel_math(poco.Pwf_test, poco.Psat))
-        )
-
-        qb = J_ipr * (poco.Pe - poco.Psat)
-        qmax = qb + (J_ipr * poco.Psat) / ReservoirConstants.VOGEL_CONSTANT
+    @staticmethod
+    def hibrido_darcy_vogel(pwf, pe, psat, j):
+        """Modelo composto: Darcy acima da Psat, Vogel abaixo da Psat."""
+        pwf = np.atleast_1d(pwf) # Garante que funcione com arrays ou escalares
+        q = np.zeros_like(pwf, dtype=float)
         
-        pwf_arr = np.linspace(0, poco.Pe, ReservoirConstants.DEFAULT_POINTS, dtype=np.float64)
-        q_arr = np.zeros_like(pwf_arr)
+        # Vazão no ponto de saturação
+        q_sat = j * (pe - psat)
+        # Qmax projetado pela regra de Vogel modificada
+        qmax_projetado = q_sat + (j * psat) / 1.8
         
-        mask_darcy = pwf_arr >= poco.Psat
-        mask_vogel = ~mask_darcy
-        
-        q_arr[mask_darcy] = J_ipr * (poco.Pe - pwf_arr[mask_darcy])
-        q_arr[mask_vogel] = qb + (J_ipr * poco.Psat) * fator_vogel_math(pwf_arr[mask_vogel], poco.Psat)
-        
-        return q_arr, pwf_arr, J_ipr, qmax
+        for i, p in enumerate(pwf):
+            if p >= pe:
+                q[i] = 0.0
+            elif p >= psat:
+                # Regime Monofásico (Darcy)
+                q[i] = j * (pe - p)
+            else:
+                # Regime Bifásico (Vogel)
+                ratio = p / psat
+                q[i] = q_sat + (qmax_projetado - q_sat) * (1 - 0.2 * ratio - 0.8 * (ratio**2))
+                
+        return q if len(q) > 1 else q[0]
+
+    @staticmethod
+    def fetkovich(pwf, pe, qmax, n):
+        """Modelo empírico de Fetkovich. 'n' varia de 0.5 a 1.0."""
+        ratio = pwf / pe
+        ratio = np.clip(ratio, 0, 1)
+        return qmax * (1 - (ratio**2))**n
