@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from typing import List
-from reservatorio.config import ReservoirConstants
+
+# Importação correta do nosso motor matemático
+from reservatorio.domain.ipr_models import ModelosIPR
 
 class CalibrationStrategy(ABC):
     @abstractmethod
@@ -17,16 +19,16 @@ class DarcyVogelCalibration(CalibrationStrategy):
         return "Darcy-Vogel Híbrido (Multi-parâmetro)"
 
     def residuals(self, params: List[float], pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float) -> np.ndarray:
+        # 1. Desempacota os parâmetros que o otimizador (TRF) está testando nesta iteração
         J, Psat = params[0], params[1]
-        q_teorico = np.empty_like(pwf_medidos)
         
-        mask_darcy = pwf_medidos >= Psat
-        mask_vogel = ~mask_darcy
+        # 2. Chama a Camada de Domínio para fazer todo o cálculo pesado instantaneamente
+        q_teorico = ModelosIPR.hibrido_darcy_vogel(
+            pwf=pwf_medidos, 
+            pe=Pe, 
+            psat=Psat, 
+            j=J
+        )
         
-        q_teorico[mask_darcy] = J * (Pe - pwf_medidos[mask_darcy])
-        
-        qb = J * (Pe - Psat)
-        fator_vogel = (1.0 - 0.2*(pwf_medidos[mask_vogel]/Psat) - 0.8*(pwf_medidos[mask_vogel]/Psat)**2) / ReservoirConstants.VOGEL_CONSTANT
-        q_teorico[mask_vogel] = qb + (J * Psat) * fator_vogel
-        
+        # 3. Retorna o resíduo (Erro) para o otimizador
         return q_teorico - q_medidos

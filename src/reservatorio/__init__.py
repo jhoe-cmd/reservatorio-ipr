@@ -9,7 +9,7 @@ __version__ = "3.1.0"
 from .config import ReservoirConstants
 from .domain.models import PocoFisico, CalibrationResult
 from .domain.skin import calcular_skin
-from .domain.ipr_models import DarcyVogelHibridoIPR, fator_vogel_math
+from .domain.ipr_models import ModelosIPR
 from .domain.calibration import DarcyVogelCalibration
 from .domain.distributions import NormalDistribution, LogNormalDistribution, TriangularDistribution
 from .infrastructure.repositories import JsonCalibrationRepository
