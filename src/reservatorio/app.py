@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd  # <-- Nova importação para manipular o relatório
 import matplotlib.pyplot as plt
 
-from reservatorio.domain.ipr_models import DarcyVogelHibridoIPR
+from reservatorio.domain.ipr_models import ModelosIPR
 from reservatorio.domain.calibration import DarcyVogelCalibration
 from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
 from reservatorio.infrastructure.repositories import JsonCalibrationRepository
