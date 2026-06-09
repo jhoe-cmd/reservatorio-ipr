@@ -5,10 +5,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import numpy as np
 import pandas as pd  # <-- Nova importação para manipular o relatório
-import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
-from reservatorio.domain.ipr_models import ModelosIPR
+from reservatorio.domain.ipr_models import DarcyVogelHibridoIPR
 from reservatorio.domain.calibration import DarcyVogelCalibration
 from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
 from reservatorio.infrastructure.repositories import JsonCalibrationRepository
@@ -97,24 +96,14 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             col5.metric("P50 (Esperado)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
             col6.metric("P10 (Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
 
-         # 1. Criar um array de pressões (de Pe até 0) para traçar a curva IPR suave
-            pwf_arr = np.linspace(pe_campo, 0, 50)
-            
-            # 2. Calcular as vazões teóricas usando a nossa nova Camada de Domínio
-            q_arr = ModelosIPR.hibrido_darcy_vogel(
-                pwf=pwf_arr, 
-                pe=pe_campo, 
-                psat=res_calibracao.Psat_calibrado, 
-                j=res_calibracao.J_calibrado
-            )
-            
-            # 3. Calcular o AOF (Potencial Máximo) passando Pwf = 0
-            aof = ModelosIPR.hibrido_darcy_vogel(
-                pwf=np.array([0.0]), 
-                pe=pe_campo, 
-                psat=res_calibracao.Psat_calibrado, 
-                j=res_calibracao.J_calibrado
-            )[0]
+            modelo = DarcyVogelHibridoIPR()
+            class MockPoco:
+                Pe = pe_campo
+                Psat = res_calibracao.Psat_calibrado
+                q_test = q_campo[1] if len(q_campo) > 1 else q_campo[0]
+                Pwf_test = pwf_campo[1] if len(pwf_campo) > 1 else pwf_campo[0]
+                
+            q_arr, pwf_arr, _, aof = modelo.calcular_curva(MockPoco(), J_in=res_calibracao.J_calibrado)
 
             q_arr_plot = q_arr * fator_conv
             q_campo_plot = q_campo * fator_conv
@@ -142,40 +131,30 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     q_medidos=q_campo,     
                     Pe=pe_campo,
                     J_opt=res_calibracao.J_calibrado,
-# --- NOVA VISUALIZAÇÃO 3D INTERATIVA (PLOTLY) ---
-                st.markdown("### 🗺️ Mapa 3D da Superfície de Erro")
-                st.info("💡 Dica: Arraste com o mouse para girar o gráfico e visualizar o 'túnel' de não-identificabilidade.")
-                
-                fig_3d = go.Figure(data=[go.Surface(
-                    z=diag['RMSE_grid'],
-                    x=diag['J_grid'],
-                    y=diag['Psat_grid'],
-                    colorscale='Viridis',
-                    colorbar=dict(title='RMSE (psi)')
-                )])
-
-                # Adiciona o ponto ótimo (a estrela) no gráfico 3D
-                fig_3d.add_trace(go.Scatter3d(
-                    x=[res_calibracao.J_calibrado],
-                    y=[res_calibracao.Psat_calibrado],
-                    z=[diag["rmse_min"]],
-                    mode='markers',
-                    marker=dict(symbol='diamond', size=8, color='red'),
-                    name='Mínimo Global'
-                ))
-
-                fig_3d.update_layout(
-                    scene=dict(
-                        xaxis_title='Índice J',
-                        yaxis_title='Psat (psi)',
-                        zaxis_title='RMSE Residual'
-                    ),
-                    margin=dict(l=0, r=0, b=0, t=30),
-                    height=600
+                    Psat_opt=res_calibracao.Psat_calibrado
                 )
+
+                col_diag1, col_diag2 = st.columns(2)
                 
-                # Renderiza no Streamlit
-                st.plotly_chart(fig_3d, use_container_width=True)
+                with col_diag1:
+                    if diag["area_incerteza_pct"] < 5.0:
+                        st.success(f"✅ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Solução Robusta)")
+                    elif diag["area_incerteza_pct"] < 20.0:
+                        st.warning(f"⚠️ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Atenção)")
+                    else:
+                        st.error(f"🚨 **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Baixa Identificabilidade)")
+                        
+                with col_diag2:
+                    if np.isnan(diag["condicionamento_ci"]):
+                        st.error("🚨 **Condicionamento (CI):** Indefinido (Matriz singular/sem dados válidos)")
+                    elif diag["condicionamento_ci"] < 10:
+                        st.success(f"✅ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Bem condicionado)")
+                    elif diag["condicionamento_ci"] < 50:
+                        st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Vale alongado)")
+                    else:
+                        st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal condicionado)")
+
+                fig_map, ax_map = plt.subplots(figsize=(8, 6))
 
                 cp = ax_map.contourf(
                     diag['J_grid'], diag['Psat_grid'], diag['RMSE_grid'], 
