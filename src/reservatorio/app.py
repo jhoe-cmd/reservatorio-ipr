@@ -96,7 +96,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             col5.metric("P50 (Esperado)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
             col6.metric("P10 (Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
 
-            modelo = DarcyVogelHibridoIPR()
+           resultado = ModelosIPR.hibrido_darcy_vogel(...)
             class MockPoco:
                 Pe = pe_campo
                 Psat = res_calibracao.Psat_calibrado
