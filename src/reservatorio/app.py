@@ -96,14 +96,24 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
             col5.metric("P50 (Esperado)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
             col6.metric("P10 (Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
 
-           resultado = ModelosIPR.hibrido_darcy_vogel(...)
-            class MockPoco:
-                Pe = pe_campo
-                Psat = res_calibracao.Psat_calibrado
-                q_test = q_campo[1] if len(q_campo) > 1 else q_campo[0]
-                Pwf_test = pwf_campo[1] if len(pwf_campo) > 1 else pwf_campo[0]
-                
-            q_arr, pwf_arr, _, aof = modelo.calcular_curva(MockPoco(), J_in=res_calibracao.J_calibrado)
+         # 1. Criar um array de pressões (de Pe até 0) para traçar a curva IPR suave
+            pwf_arr = np.linspace(pe_campo, 0, 50)
+            
+            # 2. Calcular as vazões teóricas usando a nossa nova Camada de Domínio
+            q_arr = ModelosIPR.hibrido_darcy_vogel(
+                pwf=pwf_arr, 
+                pe=pe_campo, 
+                psat=res_calibracao.Psat_calibrado, 
+                j=res_calibracao.J_calibrado
+            )
+            
+            # 3. Calcular o AOF (Potencial Máximo) passando Pwf = 0
+            aof = ModelosIPR.hibrido_darcy_vogel(
+                pwf=np.array([0.0]), 
+                pe=pe_campo, 
+                psat=res_calibracao.Psat_calibrado, 
+                j=res_calibracao.J_calibrado
+            )[0]
 
             q_arr_plot = q_arr * fator_conv
             q_campo_plot = q_campo * fator_conv
