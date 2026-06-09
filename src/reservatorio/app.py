@@ -5,6 +5,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import numpy as np
 import pandas as pd  # <-- Nova importação para manipular o relatório
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
 from reservatorio.domain.ipr_models import ModelosIPR
@@ -141,30 +142,40 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     q_medidos=q_campo,     
                     Pe=pe_campo,
                     J_opt=res_calibracao.J_calibrado,
-                    Psat_opt=res_calibracao.Psat_calibrado
-                )
-
-                col_diag1, col_diag2 = st.columns(2)
+# --- NOVA VISUALIZAÇÃO 3D INTERATIVA (PLOTLY) ---
+                st.markdown("### 🗺️ Mapa 3D da Superfície de Erro")
+                st.info("💡 Dica: Arraste com o mouse para girar o gráfico e visualizar o 'túnel' de não-identificabilidade.")
                 
-                with col_diag1:
-                    if diag["area_incerteza_pct"] < 5.0:
-                        st.success(f"✅ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Solução Robusta)")
-                    elif diag["area_incerteza_pct"] < 20.0:
-                        st.warning(f"⚠️ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Atenção)")
-                    else:
-                        st.error(f"🚨 **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Baixa Identificabilidade)")
-                        
-                with col_diag2:
-                    if np.isnan(diag["condicionamento_ci"]):
-                        st.error("🚨 **Condicionamento (CI):** Indefinido (Matriz singular/sem dados válidos)")
-                    elif diag["condicionamento_ci"] < 10:
-                        st.success(f"✅ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Bem condicionado)")
-                    elif diag["condicionamento_ci"] < 50:
-                        st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Vale alongado)")
-                    else:
-                        st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal condicionado)")
+                fig_3d = go.Figure(data=[go.Surface(
+                    z=diag['RMSE_grid'],
+                    x=diag['J_grid'],
+                    y=diag['Psat_grid'],
+                    colorscale='Viridis',
+                    colorbar=dict(title='RMSE (psi)')
+                )])
 
-                fig_map, ax_map = plt.subplots(figsize=(8, 6))
+                # Adiciona o ponto ótimo (a estrela) no gráfico 3D
+                fig_3d.add_trace(go.Scatter3d(
+                    x=[res_calibracao.J_calibrado],
+                    y=[res_calibracao.Psat_calibrado],
+                    z=[diag["rmse_min"]],
+                    mode='markers',
+                    marker=dict(symbol='diamond', size=8, color='red'),
+                    name='Mínimo Global'
+                ))
+
+                fig_3d.update_layout(
+                    scene=dict(
+                        xaxis_title='Índice J',
+                        yaxis_title='Psat (psi)',
+                        zaxis_title='RMSE Residual'
+                    ),
+                    margin=dict(l=0, r=0, b=0, t=30),
+                    height=600
+                )
+                
+                # Renderiza no Streamlit
+                st.plotly_chart(fig_3d, use_container_width=True)
 
                 cp = ax_map.contourf(
                     diag['J_grid'], diag['Psat_grid'], diag['RMSE_grid'], 
