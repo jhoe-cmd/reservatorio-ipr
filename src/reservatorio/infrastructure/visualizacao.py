@@ -81,3 +81,4 @@ class VisualizadorIncerteza:
             margin=dict(l=0, r=0, b=0, t=40)
         )
         return fig
+    
