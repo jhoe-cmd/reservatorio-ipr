@@ -19,6 +19,25 @@ from reservatorio.infrastructure.interface_entrada import InterfaceEntradaDados 
 
 # 1. Configuração da Página Web
 st.set_page_config(page_title="Simulador IPR", page_icon="🛢️", layout="wide")
+# --- BANCO DE DADOS SINTÉTICO (PRESETS) ---
+PRESETS_POCOS = {
+    "Entrada Manual / Tabela": None,
+    "Caso 1: Pré-Sal (Monofásico - Não Identificável)": {
+        "Pe": 6500.0,
+        "Pwf": [6000.0, 5500.0, 5000.0, 4500.0],
+        "Q": [600.0, 1200.0, 1800.0, 2400.0]
+    },
+    "Caso 2: Campo Maduro (Bifásico - Vogel)": {
+        "Pe": 2500.0,
+        "Pwf": [2000.0, 1500.0, 1000.0, 500.0],
+        "Q": [980.0, 1780.0, 2380.0, 2780.0]
+    },
+    "Caso 3: Convencional (Transição Darcy-Vogel)": {
+        "Pe": 5000.0,
+        "Pwf": [4500.0, 4000.0, 2500.0, 1500.0],
+        "Q": [750.0, 1500.0, 3560.0, 4490.0]
+    }
+}
 
 st.title("🛢️ Simulador IPR - Análise de Produtividade")
 st.markdown("Plataforma de **History Matching** e **Análise de Risco (Monte Carlo)**.")
@@ -48,6 +67,17 @@ elif unidade_vazao == "m³/d":
     fator_conv = 0.158987
 else: 
     fator_conv = 158.987
+
+   
+st.sidebar.header("📚 Carregar Cenário")
+cenario_escolhido = st.sidebar.selectbox("Selecione um caso de estudo:", list(PRESETS_POCOS.keys()))
+
+st.sidebar.markdown("---")
+st.sidebar.header("Parâmetros do Poço")
+
+# Atualiza a Pe automaticamente se um preset for escolhido
+pe_default = PRESETS_POCOS[cenario_escolhido]["Pe"] if PRESETS_POCOS[cenario_escolhido] else 6200.0
+pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=pe_default, step=100.0)
 
 # --- NOVA INTERFACE DE ENTRADA (UPLOAD / EXCEL) ---
 df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
