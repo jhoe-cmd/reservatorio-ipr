@@ -1,7 +1,7 @@
 streamlit
 numpy
+pandas
 matplotlib
-scipy
-pydantic
-pint
+plotly
 scikit-learn
+scipy
