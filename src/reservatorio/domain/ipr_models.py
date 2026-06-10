@@ -5,7 +5,7 @@ class ModelosIPR:
     Camada de Domínio: Contém as leis físicas de escoamento.
     Nenhuma dependência de interface gráfica (Streamlit) deve entrar aqui.
     """
-@staticmethod
+    @staticmethod
     def fetkovich(pwf: np.ndarray, pe: float, c: float, n: float) -> np.ndarray:
         """
         Calcula a vazão teórica pelo modelo de Fetkovich para gás/alta turbulência.
