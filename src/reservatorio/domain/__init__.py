@@ -10,8 +10,8 @@ from .models import PocoFisico, CalibrationResult
 # Regras Físicas Analíticas
 from .skin import calcular_skin
 
-# Estratégias de Curvas IPR (ATUALIZADO PARA A NOVA ARQUITETURA)
-from .ipr_models import IPRStrategy, ModelosIPR
+# Estratégias de Curvas IPR (APENAS A NOVA ARQUITETURA)
+from .ipr_models import ModelosIPR
 
 # Estratégias de Calibração (Cálculo de Resíduos)
 from .calibration import CalibrationStrategy, DarcyVogelCalibration
@@ -34,8 +34,7 @@ __all__ = [
     "calcular_skin",
     
     # IPR
-    "IPRStrategy",
-    "ModelosIPR",  # <-- Nova classe central de equações
+    "ModelosIPR",  # <-- Agora é a única classe exportada daqui
     
     # Calibration
     "CalibrationStrategy",
