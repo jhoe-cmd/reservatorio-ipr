@@ -32,3 +32,22 @@ class DarcyVogelCalibration(CalibrationStrategy):
         
         # 3. Retorna o resíduo (Erro) para o otimizador
         return q_teorico - q_medidos
+    
+    class FetkovichCalibration(CalibrationStrategy):
+    def get_model_name(self) -> str:
+        return "Fetkovich (Gás / Alta Turbulência)"
+
+    def residuals(self, params: List[float], pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float) -> np.ndarray:
+        # Para Fetkovich, o otimizador testará valores de C e n nesta iteração
+        C, n = params[0], params[1]
+        
+        # Calcula as vazões teóricas equivalentes
+        q_teorico = ModelosIPR.fetkovich(
+            pwf=pwf_medidos,
+            pe=Pe,
+            c=C,
+            n=n
+        )
+        
+        # Retorna o vetor de erros (resíduos)
+        return q_teorico - q_medidos
