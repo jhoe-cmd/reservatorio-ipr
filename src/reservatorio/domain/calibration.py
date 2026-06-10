@@ -33,7 +33,7 @@ class DarcyVogelCalibration(CalibrationStrategy):
         # 3. Retorna o resíduo (Erro) para o otimizador
         return q_teorico - q_medidos
     
-    class FetkovichCalibration(CalibrationStrategy):
+class FetkovichCalibration(CalibrationStrategy):
     def get_model_name(self) -> str:
         return "Fetkovich (Gás / Alta Turbulência)"
 
