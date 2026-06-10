@@ -312,6 +312,61 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     mime="text/csv",
                     type="primary"
                 )
+# --- NOVA FUNCIONALIDADE: EXPORTAÇÃO EM LATEX ---
+                st.markdown("#### 📐 Documentação Acadêmica")
+                
+                # Montando o documento LaTeX dinâmico com os dados do poço
+                latex_content = f"""\\documentclass{{article}}
+\\usepackage[utf8]{{inputenc}}
+\\usepackage{{amsmath}}
+\\usepackage{{geometry}}
+\\geometry{{a4paper, margin=2cm}}
 
+\\begin{{document}}
+
+\\section*{{Memorial de Cálculo - Curva IPR: {well_name}}}
+
+\\subsection*{{1. Parâmetros de Entrada e Calibração}}
+Com base no ajuste histórico (History Matching) utilizando o algoritmo Trust Region Reflective, os parâmetros otimizados obtidos foram:
+\\begin{{itemize}}
+    \\item Pressão Estática ($P_e$): {pe_campo:.2f} psi
+    \\item Pressão de Saturação ($P_{{sat}}$): {res_calibracao.Psat_calibrado:.2f} psi
+    \\item Índice de Produtividade ($J$): {res_calibracao.J_calibrado:.4f} STB/d/psi
+    \\item Erro Residual (RMSE): {diag['rmse_min']:.2f} psi
+\\end{{itemize}}
+
+\\subsection*{{2. Equações Governantes (Modelo Híbrido Darcy-Vogel)}}
+Para o regime de fluxo monofásico, onde a pressão de fundo é superior à pressão de saturação ($P_{{wf}} \\geq P_{{sat}}$), a vazão é dada pela Lei de Darcy:
+\\begin{{equation}}
+    q = {res_calibracao.J_calibrado:.4f} \\times ({pe_campo:.2f} - P_{{wf}})
+\\end{{equation}}
+
+Para o regime bifásico ($P_{{wf}} < P_{{sat}}$), o escoamento é governado pela formulação generalizada de Vogel. A vazão no ponto de bolha ($q_b$) é:
+\\begin{{equation}}
+    q_b = {res_calibracao.J_calibrado:.4f} \\times ({pe_campo:.2f} - {res_calibracao.Psat_calibrado:.2f})
+\\end{{equation}}
+
+E a curva não-linear inferior é descrita por:
+\\begin{{equation}}
+    q = q_b + \\frac{{{res_calibracao.J_calibrado:.4f} \\times {res_calibracao.Psat_calibrado:.2f}}}{{1.8}} \\left[ 1 - 0.2\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right) - 0.8\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right)^2 \\right]
+\\end{{equation}}
+
+\\subsection*{{3. Potencial Máximo (AOF)}}
+Avaliando o limite teórico para $P_{{wf}} = 0$, o Absolute Open Flow calculado é:
+\\begin{{equation}}
+    AOF = {aof_plot:.2f} \\text{{ {unidade_vazao}}}
+\\end{{equation}}
+
+\\end{{document}}
+"""
+
+                # Botão de Download do arquivo .tex
+                st.download_button(
+                    label=f"🖩 Baixar Memorial em LaTeX (.tex)",
+                    data=latex_content,
+                    file_name=f"memorial_ipr_{well_name.replace(' ', '_').lower()}.tex",
+                    mime="text/plain",
+                    type="secondary"
+                )
             except Exception as e:
                 st.error(f"Ocorreu um erro na simulação matemática: {e}")
