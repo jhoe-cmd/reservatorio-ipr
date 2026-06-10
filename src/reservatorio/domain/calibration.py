@@ -37,17 +37,12 @@ class FetkovichCalibration(CalibrationStrategy):
     def get_model_name(self) -> str:
         return "Fetkovich (Gás / Alta Turbulência)"
 
-    def residuals(self, params: List[float], pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float) -> np.ndarray:
-        # Para Fetkovich, o otimizador testará valores de C e n nesta iteração
-        C, n = params[0], params[1]
+    def residuals(self, params: list[float], pwf_medidos: np.ndarray, q_medidos: np.ndarray, Pe: float) -> np.ndarray:
+        # C e n vêm do algoritmo de otimização
+        C_val, n_val = params[0], params[1]
         
-        # Calcula as vazões teóricas equivalentes
-        q_teorico = ModelosIPR.fetkovich(
-            pwf=pwf_medidos,
-            pe=Pe,
-            c=C,
-            n=n
-        )
+        # Passagem POSICIONAL: (pwf, pe, c, n)
+        # Isso blinda contra qualquer erro de letra maiúscula/minúscula ('c' vs 'C')
+        q_teorico = ModelosIPR.fetkovich(pwf_medidos, Pe, C_val, n_val)
         
-        # Retorna o vetor de erros (resíduos)
         return q_teorico - q_medidos
