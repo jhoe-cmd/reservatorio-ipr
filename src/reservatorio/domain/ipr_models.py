@@ -5,7 +5,18 @@ class ModelosIPR:
     Camada de Domínio: Contém as leis físicas de escoamento.
     Nenhuma dependência de interface gráfica (Streamlit) deve entrar aqui.
     """
-
+@staticmethod
+    def fetkovich(pwf: np.ndarray, pe: float, c: float, n: float) -> np.ndarray:
+        """
+        Calcula a vazão teórica pelo modelo de Fetkovich para gás/alta turbulência.
+        q = C * (Pe^2 - Pwf^2)^n
+        """
+        # Garante que a Pwf não ultrapassa a Pe por ruído numérico
+        pwf_clipped = np.clip(pwf, 0, pe)
+        
+        # Cálculo vetorizado da equação de Fetkovich
+        return c * (pe**2 - pwf_clipped**2)**n
+    
     @staticmethod
     def darcy_linear(pwf, pe, j):
         """Modelo linear para regime monofásico."""
