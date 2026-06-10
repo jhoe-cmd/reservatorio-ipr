@@ -42,10 +42,39 @@ PRESETS_POCOS = {
 st.title("🛢️ Simulador IPR - Análise de Produtividade")
 st.markdown("Plataforma de **History Matching** e **Análise de Risco (Monte Carlo)**.")
 
+# --- BANCO DE DADOS SINTÉTICO (PRESETS) ---
+PRESETS_POCOS = {
+    "Entrada Manual / Tabela": None,
+    "Caso 1: Pré-Sal (Monofásico - Não Identificável)": {
+        "Pe": 6500.0,
+        "Pwf": [6000.0, 5500.0, 5000.0, 4500.0],
+        "Q": [600.0, 1200.0, 1800.0, 2400.0]
+    },
+    "Caso 2: Campo Maduro (Bifásico - Vogel)": {
+        "Pe": 2500.0,
+        "Pwf": [2000.0, 1500.0, 1000.0, 500.0],
+        "Q": [980.0, 1780.0, 2380.0, 2780.0]
+    },
+    "Caso 3: Convencional (Transição Darcy-Vogel)": {
+        "Pe": 5000.0,
+        "Pwf": [4500.0, 4000.0, 2500.0, 1500.0],
+        "Q": [750.0, 1500.0, 3560.0, 4490.0]
+    }
+}
+
 # 2. Barra Lateral (Inputs do Usuário)
+st.sidebar.header("📚 Carregar Cenário")
+cenario_escolhido = st.sidebar.selectbox("Selecione um caso de estudo:", list(PRESETS_POCOS.keys()))
+
+st.sidebar.markdown("---")
 st.sidebar.header("Parâmetros do Poço")
-well_name = st.sidebar.text_input("Nome do Poço", value="Pré-Sal Santos 01")
-pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=6200.0, step=100.0)
+
+# Atualiza o Nome e a Pe automaticamente se um preset for escolhido
+nome_padrao = cenario_escolhido if cenario_escolhido != "Entrada Manual / Tabela" else "Pré-Sal Santos 01"
+well_name = st.sidebar.text_input("Nome do Poço", value=nome_padrao)
+
+pe_default = PRESETS_POCOS[cenario_escolhido]["Pe"] if PRESETS_POCOS[cenario_escolhido] else 6200.0
+pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=pe_default, step=100.0)
 
 st.sidebar.subheader("Otimização e Parâmetros")
 j_guess = st.sidebar.number_input("Índice J Inicial", value=1.5, step=0.1)
@@ -68,21 +97,23 @@ elif unidade_vazao == "m³/d":
 else: 
     fator_conv = 158.987
 
-   
-st.sidebar.header("📚 Carregar Cenário")
-cenario_escolhido = st.sidebar.selectbox("Selecione um caso de estudo:", list(PRESETS_POCOS.keys()))
+# --- LÓGICA DE ENTRADA DE DADOS (PRESET vs MANUAL) ---
+if cenario_escolhido == "Entrada Manual / Tabela":
+    # Renderiza a tabela limpa para o usuário colar do Excel
+    df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
+    dados_validos, pwf_campo, q_campo = InterfaceEntradaDados.validar_dados(df_dados_poco)
+else:
+    # Esconde a tabela e injeta os dados matemáticos perfeitos do preset
+    st.success(f"✅ Dados sintéticos carregados automaticamente para: **{cenario_escolhido}**")
+    pwf_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Pwf"])
+    q_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Q"])
+    dados_validos = True
+    
+    # Mostra um pequeno resumo das variáveis injetadas
+    st.write("📊 **Dados de Teste do Cenário:**")
+    st.dataframe(pd.DataFrame({"Pwf (psi)": pwf_campo, "Vazão (bbl/d)": q_campo}), hide_index=True)
 
-st.sidebar.markdown("---")
-st.sidebar.header("Parâmetros do Poço")
-
-# Atualiza a Pe automaticamente se um preset for escolhido
-pe_default = PRESETS_POCOS[cenario_escolhido]["Pe"] if PRESETS_POCOS[cenario_escolhido] else 6200.0
-pe_campo = st.sidebar.number_input("Pressão Estática - Pe (psi)", value=pe_default, step=100.0)
-
-# --- NOVA INTERFACE DE ENTRADA (UPLOAD / EXCEL) ---
-df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
-dados_validos, pwf_campo, q_campo = InterfaceEntradaDados.validar_dados(df_dados_poco)
-
+# (O Botão de Execução "if st.sidebar.button..." continua logo aqui embaixo)
 # 3. Botão de Execução
 if st.sidebar.button("Rodar Simulação", type="primary"):
     if not dados_validos:
