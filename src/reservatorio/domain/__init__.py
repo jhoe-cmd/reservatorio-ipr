@@ -45,4 +45,14 @@ __all__ = [
     "NormalDistribution",
     "LogNormalDistribution",
     "TriangularDistribution",
+]# Modifique a linha de importação do calibration para incluir o novo modelo:
+from .calibration import CalibrationStrategy, DarcyVogelCalibration, FetkovichCalibration
+
+# E adicione no __all__ lá embaixo:
+__all__ = [
+    # ... outros já existentes ...
+    "CalibrationStrategy",
+    "DarcyVogelCalibration",
+    "FetkovichCalibration", # <-- Adicione esta linha
+    # ...
 ]
