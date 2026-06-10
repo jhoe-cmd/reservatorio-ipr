@@ -111,11 +111,11 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 
                 # 3. Calcular o AOF (Potencial Máximo) passando Pwf = 0
                 aof = ModelosIPR.hibrido_darcy_vogel(
-                    pwf=np.array([0.0]), 
+                    pwf=0.0, 
                     pe=pe_campo, 
                     psat=res_calibracao.Psat_calibrado, 
                     j=res_calibracao.J_calibrado
-                )[0]
+                )
 
                 q_arr_plot = q_arr * fator_conv
                 q_campo_plot = q_campo * fator_conv
