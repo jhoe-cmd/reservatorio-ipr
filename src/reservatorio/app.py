@@ -42,17 +42,14 @@ PRESETS_POCOS = {
     }
 }
 
-# Inicializa a memória de cenários (Ghost Curves)
 if "ghost_curves" not in st.session_state:
     st.session_state["ghost_curves"] = []
 
-# 1. Configuração da Página Web
 st.set_page_config(page_title="Simulador IPR", page_icon="🛢️", layout="wide")
 
 st.title("🛢️ Simulador IPR - Análise de Produtividade")
 st.markdown("Plataforma de **History Matching** e **Acoplamento Térmico**.")
 
-# 2. Barra Lateral (Inputs do Usuário)
 st.sidebar.header("📚 Carregar Cenário")
 cenario_escolhido = st.sidebar.selectbox("Selecione um caso de estudo:", list(PRESETS_POCOS.keys()))
 
@@ -88,7 +85,6 @@ st.sidebar.subheader("Configurações de Saída")
 unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d", "L/d"], horizontal=True)
 fator_conv = 1.0 if unidade_vazao == "bbl/d" else (0.158987 if unidade_vazao == "m³/d" else 158.987)
 
-# --- NOVA SEÇÃO: MÓDULO DA DISSERTAÇÃO ---
 st.sidebar.markdown("---")
 st.sidebar.header("🌡️ Análise de Temperatura (Dissertação)")
 ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Térmico", value=True)
@@ -98,12 +94,10 @@ if ativar_termico:
     incerteza_pct = st.sidebar.slider("Perturbação de Propriedades (%)", -10.0, 10.0, 5.0, step=1.0)
     st.sidebar.caption("Simula a variação térmica em relação ao modelo base.")
 
-# Botão para limpar o histórico de curvas comparativas
 if st.sidebar.button("🗑️ Limpar Curvas Comparativas"):
     st.session_state["ghost_curves"] = []
     st.sidebar.success("Histórico limpo!")
 
-# --- LÓGICA DE ENTRADA DE DADOS ---
 if cenario_escolhido == "Entrada Manual / Tabela":
     df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
     dados_validos, pwf_campo, q_campo = InterfaceEntradaDados.validar_dados(df_dados_poco)
@@ -115,7 +109,6 @@ else:
     st.write("📊 **Dados de Teste de Campo Carregados:**")
     st.dataframe(pd.DataFrame({"Pwf (psi)": pwf_campo, f"Vazão ({unidade_vazao})": q_campo * fator_conv}), hide_index=True)
 
-# 3. Botão de Execução Principal
 if st.sidebar.button("Rodar Simulação", type="primary"):
     if not dados_validos:
         st.error("Por favor, garanta que os dados da tabela estejam preenchidos.")
@@ -149,10 +142,8 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     
                 col3.metric("Erro Global (RMSE)", f"{getattr(res_calibracao, 'rmse', 0.0):.2f} psi")
 
-                # --- GERADOR VETORIAL DA CURVA IPR E MÓDULO TÉRMICO ---
                 pwf_arr = np.linspace(pe_campo, 0, 50)
                 
-                # 1. Curva Base Isotérmica
                 if is_fetkovich:
                     q_arr_base = ModelosIPR.fetkovich(pwf_arr, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
                     aof_base = ModelosIPR.fetkovich(0.0, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
@@ -160,7 +151,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     q_arr_base = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
                     aof_base = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
 
-                # 2. Curva Térmica
                 if ativar_termico:
                     j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, incerteza_pct)
                     if is_fetkovich:
@@ -183,7 +173,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     "pwf": pwf_arr
                 })
 
-                # --- PLOT DA CURVA PRINCIPAL ---
                 fig, ax = plt.subplots(figsize=(11, 5))
                 for ghost in st.session_state["ghost_curves"][:-1]:
                     ax.plot(ghost["q"], ghost["pwf"], color='gray', alpha=0.3, linestyle='--', label=f"Histórico: {ghost['name']}")
@@ -207,25 +196,33 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 ax.legend(loc='upper right', fontsize=9)
                 st.pyplot(fig) 
 
-                # --- DIAGNÓSTICO 3D ---
                 st.markdown("---")
                 st.subheader("🔍 Diagnóstico de Incerteza Numérica e Identificabilidade")
 
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
-                    j_para_diagnostico = j_termico if ativar_termico else res_calibracao.J_calibrado
-                    diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, j_para_diagnostico, res_calibracao.Psat_calibrado, is_fetkovich)
+                    # Correção 1: O mapa reflete estritamente o problema de calibração base
+                    diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich)
+
+                    # Correção 4: Cálculo da área não-enviesada (mascarando os NaNs)
+                    limiar_incerteza = diag["rmse_min"] * 1.10
+                    mask_valid = ~np.isnan(diag['RMSE_grid'])
+                    area_pixels = np.sum((diag['RMSE_grid'] <= limiar_incerteza) & mask_valid)
+                    
+                    if np.sum(mask_valid) > 0:
+                        diag["area_incerteza_pct"] = (area_pixels / np.sum(mask_valid)) * 100
+                    else:
+                        diag["area_incerteza_pct"] = 0.0
 
                     col_diag1, col_diag2 = st.columns(2)
                     with col_diag1:
                         if diag["area_incerteza_pct"] < 5.0:
-                            st.success(f"✅ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Solução de Alta Identificabilidade)")
+                            st.success(f"✅ **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Alta Identificabilidade)")
                         elif diag["area_incerteza_pct"] < 20.0:
-                            st.warning(f"⚠️ **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Região Estendida / Atenção)")
+                            st.warning(f"⚠️ **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Região Estendida)")
                         else:
-                            st.error(f"🚨 **Área de Incerteza:** {diag['area_incerteza_pct']:.1f}% (Vale de Degenerescência)")
+                            st.error(f"🚨 **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Vale de Degenerescência)")
                             
                     with col_diag2:
-                        # Tratamento rigoroso do NaN para o Condicionamento
                         if np.isnan(diag.get("condicionamento_ci", np.nan)):
                             st.info("ℹ️ **Condicionamento (CI):** Região degenerada. Impossível calcular o CI com robustez geométrica.")
                         elif diag["condicionamento_ci"] < 10:
@@ -239,12 +236,11 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     label_y = 'Expoente de Turbulência n' if is_fetkovich else 'Pressão de Saturação Psat (psi)'
 
                     fig_3d = go.Figure(data=[go.Surface(z=diag['RMSE_grid'], x=diag['J_grid'], y=diag['Psat_grid'], colorscale='Viridis')])
-                    fig_3d.add_trace(go.Scatter3d(x=[j_para_diagnostico], y=[res_calibracao.Psat_calibrado], z=[diag["rmse_min"]],
+                    fig_3d.add_trace(go.Scatter3d(x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[diag["rmse_min"]],
                         mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Mínimo Global'))
                     fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='RMSE (psi)'), height=550)
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                # --- TORNADO DIRIGIDO A DADOS (MONTE CARLO) ---
                 st.markdown("### 🌪️ Análise de Sensibilidade Estocástica (Spearman Rank)")
                 
                 with st.spinner("Executando Monte Carlo para cálculo de variância explicada..."):
@@ -254,18 +250,22 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     if is_fetkovich:
                         p1_samples = np.random.lognormal(mean=np.log(max(1e-5, res_calibracao.J_calibrado)), sigma=0.1, size=n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(0.05, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        # Cálculo AOF Vetorizado Fetkovich
-                        aof_samples = p1_samples * (pe_samples**2)**p2_samples
+                        # Correção 3: Restrição física para Fetkovich (expoente n)
+                        p2_samples = np.clip(p2_samples, 0.5, 1.0)
+                        
+                        # Correção 2: Desacoplamento mitigado, unificando a física
+                        aof_samples = ModelosIPR.fetkovich(np.zeros_like(pe_samples), pe_samples, p1_samples, p2_samples)
                     else:
                         p1_samples = np.random.normal(res_calibracao.J_calibrado, res_calibracao.J_calibrado * 0.1, n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(50.0, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        # Cálculo AOF Vetorizado Darcy-Vogel
-                        qb_samples = p1_samples * (pe_samples - p2_samples)
-                        aof_samples = qb_samples + (p1_samples * p2_samples) / 1.8
+                        # Correção 3: Restrição física para Darcy-Vogel (Psat menor que Pe)
+                        p2_samples = np.clip(p2_samples, 100.0, pe_samples * 0.999)
+                        
+                        # Correção 2: Desacoplamento mitigado, unificando a física
+                        aof_samples = ModelosIPR.hibrido_darcy_vogel(np.zeros_like(pe_samples), pe_samples, p2_samples, p1_samples)
                         
                     df_amostras = pd.DataFrame({'Pe': pe_samples, 'P1': p1_samples, 'P2': p2_samples, 'AOF': aof_samples})
                     
-                    # Correlação de Postos de Spearman
                     correlacoes = df_amostras[['P2', 'Pe', 'P1']].corrwith(df_amostras['AOF'], method='spearman')
                     variancia_explicada = correlacoes**2
                     impacto_percentual = (variancia_explicada / variancia_explicada.sum()) * 100
@@ -285,11 +285,9 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     )
                     st.plotly_chart(fig_tornado, use_container_width=True)
 
-                # --- EXPORTAÇÃO BLINDADA ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
-                # Variáveis convertidas com segurança fora das strings
                 str_j = f"{res_calibracao.J_calibrado:.4f}"
                 str_p = f"{res_calibracao.Psat_calibrado:.2f}"
                 str_pe = f"{pe_campo:.2f}"
