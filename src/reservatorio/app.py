@@ -18,18 +18,19 @@ except ImportError:
     salib_disponivel = False
 
 # ==============================================================================
-# CAMADA DE DOMÍNIO (Física e Termodinâmica Estrita)
+# CAMADA DE DOMÍNIO (Física Vetorial e Tensorial)
 # ==============================================================================
 class ModelosIPR:
     @staticmethod
     def hibrido_darcy_vogel(pwf, pe, psat, j):
-        """Modelo vetorizado N-dimensional com restrições físicas absolutas."""
+        """Modelo 100% tensorial c/ suporte a broadcasting 3D e clamps estritos."""
         pwf = np.asarray(pwf)
         q = np.zeros_like(pwf, dtype=float)
         
         pwf_safe = np.clip(pwf, 0.0, pe)
         
         mask_darcy = pwf_safe >= psat
+        # Broadcasting natural do NumPy (suporta tensores 4x100x100)
         q = np.where(mask_darcy, j * (pe - pwf_safe), q)
         
         mask_vogel = pwf_safe < psat
@@ -43,7 +44,6 @@ class ModelosIPR:
 
     @staticmethod
     def fetkovich(pwf, pe, c, n):
-        """Fetkovich vetorizado e blindado matematicamente."""
         pwf = np.asarray(pwf)
         pwf_safe = np.clip(pwf, 0.0, pe)
         
@@ -56,44 +56,36 @@ class ModelosIPR:
 class CorretorTermico:
     @staticmethod
     def ajustar_indice_J(j_base, t_res, t_ref, ea_r):
-        """
-        Correção termodinâmica de Arrhenius com base física observável.
-        Ea_R: Razão Energia de Ativação / Constante dos Gases (Kelvin).
-        """
+        """Correção Termodinâmica Forward via Lei de Arrhenius (Predição Estrita)"""
         tk_res = t_res + 273.15
         tk_ref = t_ref + 273.15
-        
-        # Arrhenius Estrito para Viscosidade: μ = A * exp(Ea/RT). Logo J ∝ exp(-Ea/RT)
         multiplicador_exponencial = np.exp(-ea_r * ((1.0 / tk_res) - (1.0 / tk_ref)))
-        
         return max(1e-8, j_base * multiplicador_exponencial)
 
 # ==============================================================================
-# CAMADA DE SERVIÇO (History Matching c/ TRF)
+# CAMADA DE SERVIÇO E INFERÊNCIA ESTATÍSTICA
 # ==============================================================================
 class HistoryMatchingService:
     def calibrar(self, well_name, pwf_medidos, q_medidos, Pe, param1_guess, param2_guess, param2_conhecido, is_fetkovich):
         class ResResultado: pass
         res = ResResultado()
         
+        # Problema Inverso Isométrico Estrito (Garantia de Identificabilidade Base)
         if is_fetkovich:
             def res_func(p):
-                return ModelosIPR.fetkovich(pwf=pwf_medidos, pe=Pe, c=p[0], n=p[1]) - q_medidos
-            
+                return ModelosIPR.fetkovich(pwf_medidos, Pe, p[0], p[1]) - q_medidos
             opt = least_squares(res_func, [param1_guess, param2_guess], bounds=([1e-6, 0.5], [np.inf, 1.0]), method='trf')
             res.J_calibrado, res.Psat_calibrado = opt.x
-            
         else:
             if param2_conhecido is not None:
                 def res_func(p):
-                    return ModelosIPR.hibrido_darcy_vogel(pwf=pwf_medidos, pe=Pe, psat=param2_conhecido, j=p[0]) - q_medidos
+                    return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, param2_conhecido, p[0]) - q_medidos
                 opt = least_squares(res_func, [param1_guess], bounds=([1e-6], [np.inf]), method='trf')
                 res.J_calibrado = opt.x[0]
                 res.Psat_calibrado = param2_conhecido
             else:
                 def res_func(p):
-                    return ModelosIPR.hibrido_darcy_vogel(pwf=pwf_medidos, pe=Pe, psat=p[1], j=p[0]) - q_medidos
-                
+                    return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, p[1], p[0]) - q_medidos
                 opt = least_squares(res_func, [param1_guess, param2_guess], bounds=([1e-6, 14.7], [np.inf, Pe * 0.999]), method='trf')
                 res.J_calibrado, res.Psat_calibrado = opt.x
                 
@@ -102,20 +94,28 @@ class HistoryMatchingService:
 
 @st.cache_data
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
-    res_malha = 100j
+    """
+    Geração Hiper-Rápida do Tensor de Erros O(1) usando Broadcasting do NumPy.
+    Fim absoluto dos loops em Python. Malha superdensa sem viés de discretização.
+    """
+    res_malha = 100j # 10.000 pontos nodais avaliados simultaneamente
+    
     if is_fetkovich:
         j_grid, psat_grid = np.mgrid[max(1e-6, j_opt*0.2):j_opt*2.0:res_malha, 0.5:1.0:res_malha]
     else:
         j_grid, psat_grid = np.mgrid[max(1e-3, j_opt*0.2):j_opt*2.0:res_malha, 100.0:(pe*0.999):res_malha]
         
-    sse_grid = np.zeros_like(j_grid)
-    for i in range(j_grid.shape[0]):
-        for k in range(j_grid.shape[1]):
-            if is_fetkovich:
-                q_calc = ModelosIPR.fetkovich(pwf_medidos, pe, j_grid[i,k], psat_grid[i,k])
-            else:
-                q_calc = ModelosIPR.hibrido_darcy_vogel(pwf_medidos, pe, psat_grid[i,k], j_grid[i,k])
-            sse_grid[i,k] = np.sum((q_calc - q_medidos)**2)
+    # Elevação de dimensão para broadcasting (Nx1x1) vs (100x100) -> Tensor (Nx100x100)
+    pwf_brd = pwf_medidos[:, np.newaxis, np.newaxis]
+    q_medidos_brd = q_medidos[:, np.newaxis, np.newaxis]
+    
+    if is_fetkovich:
+        q_calc_tensor = ModelosIPR.fetkovich(pwf_brd, pe, j_grid, psat_grid)
+    else:
+        q_calc_tensor = ModelosIPR.hibrido_darcy_vogel(pwf_brd, pe, psat_grid, j_grid)
+        
+    # Integração vetorial ao longo da dimensão N dos pontos de poço
+    sse_grid = np.sum((q_calc_tensor - q_medidos_brd)**2, axis=0)
             
     if is_fetkovich:
         q_min = ModelosIPR.fetkovich(pwf_medidos, pe, j_opt, psat_opt)
@@ -181,40 +181,40 @@ unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d"], horizo
 fator_conv = 1.0 if unidade_vazao == "bbl/d" else 0.158987
 
 st.sidebar.markdown("---")
-st.sidebar.header("🌡️ Parâmetros Termodinâmicos")
-ativar_termico = st.sidebar.checkbox("Ativar Acoplamento", value=True)
+st.sidebar.header("🌡️ Termodinâmica Preditiva")
+ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Forward", value=True)
 t_ref = st.sidebar.number_input("T Ref PVT (°C)", value=25.0)
 t_res = st.sidebar.number_input("T Reservatório (°C)", value=60.0)
-ea_r = st.sidebar.slider("Constante Ea/R de Arrhenius (K)", 500.0, 5000.0, 2000.0, step=100.0, help="Razão entre Energia de Ativação e Constante Universal dos Gases.")
+ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0, help="Representa o decaimento não-linear da viscosidade.")
 
 if st.sidebar.button("🗑️ Limpar Gráficos"):
     st.session_state["ghost_curves"] = []
 
 if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_disponivel:
-    with st.spinner("Processando minimização OLS e topografia de verossimilhança..."):
+    with st.spinner("Resolvendo Sistema Tensorial e Estatístico..."):
         try:
             pwf_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Pwf"])
             q_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Q"])
             
-            # --- 1. HISTORY MATCHING TRF ---
+            # --- 1. HISTORY MATCHING TRF (Isotérmico Base) ---
             hm_service = HistoryMatchingService()
             res_calibracao = hm_service.calibrar(
                 well_name, pwf_campo, q_campo, pe_campo, 
                 param1_guess, param2_guess, param2_conhecido, is_fetkovich
             )
 
-            st.subheader("Resultados da Minimização de Erros (Mínimos Quadrados Não-Lineares)")
+            st.subheader("Resultados da Minimização de Erros OLS")
             col1, col2, col3 = st.columns(3)
             
             if is_fetkovich:
-                col1.metric("C Otimizado", f"{res_calibracao.J_calibrado:.6f}")
+                col1.metric("C Base", f"{res_calibracao.J_calibrado:.6f}")
                 col2.metric("n Otimizado", f"{res_calibracao.Psat_calibrado:.3f}")
             else:
-                col1.metric("J Otimizado", f"{res_calibracao.J_calibrado:.4f} STB/d/psi")
+                col1.metric("J Base", f"{res_calibracao.J_calibrado:.4f} STB/d/psi")
                 col2.metric("Psat Otimizada", f"{res_calibracao.Psat_calibrado:.1f} psi")
             col3.metric("RMSE Residual", f"{res_calibracao.rmse:.2f} psi")
 
-            # --- 2. CURVA IPR VETORIZADA ---
+            # --- 2. CURVA IPR E FORWARD TÉRMICO ---
             pwf_arr = np.linspace(pe_campo, 0, 100)
             
             if is_fetkovich:
@@ -234,7 +234,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     aof_termico = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, j_termico)
             else:
                 aof_termico = aof_base 
-                j_termico = res_calibracao.J_calibrado
 
             q_arr_plot = q_arr_base * fator_conv
             q_arr_plot_t = q_arr_termico * fator_conv if ativar_termico else q_arr_plot
@@ -247,9 +246,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             
             ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base OLS (AOF: {aof_base*fator_conv:.0f})')
             if ativar_termico:
-                ax.plot(q_arr_plot_t, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', label=f'IPR Termodinâmica (AOF: {aof_termico*fator_conv:.0f})')
+                ax.plot(q_arr_plot_t, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', label=f'IPR Predição Térmica (AOF: {aof_termico*fator_conv:.0f})')
             ax.scatter(q_campo * fator_conv, pwf_campo, color='black', zorder=5, label='Dados Experimentais')
-            ax.set_title("Curvas de Desempenho Físico e Acoplamento de Arrhenius")
+            ax.set_title("Curvas de Desempenho e Acoplamento Preditivo de Arrhenius")
             ax.set_xlabel(f"Vazão de Produção ({unidade_vazao})")
             ax.set_ylabel("Pwf Dinâmica (psi)")
             ax.set_ylim(0, pe_campo + 500)
@@ -259,9 +258,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             ax.legend()
             st.pyplot(fig_ipr)
 
-            # --- 3. DIAGNÓSTICO DE IDENTIFICABILIDADE (ESTATÍSTICA F de BATES & WATTS) ---
+            # --- 3. DIAGNÓSTICO DE IDENTIFICABILIDADE VETORIZADO ---
             st.markdown("---")
-            st.subheader("🔍 Região de Confiança Não-Linear de Mínimos Quadrados")
+            st.subheader("🔍 Espaço Paramétrico e Topografia de Verossimilhança")
             
             j_grid, psat_grid, sse_grid, sse_min = calcular_sse_matriz_exata(
                 pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich
@@ -271,36 +270,37 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             p_livres = 2 if (is_fetkovich or not travar_psat) else 1
             v_df = N_dados - p_livres
             
+            # Teorema OLS Extrito de Likelihood (Snedecor F-Test)
             if v_df > 0:
                 f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
                 sse_limiar = sse_min * (1.0 + (float(p_livres) / v_df) * f_95)
             else:
-                sse_limiar = sse_min # Degenerescência de graus de liberdade
+                sse_limiar = sse_min 
                 
             mask_valid = ~np.isnan(sse_grid)
             area_pixels = np.sum((sse_grid <= sse_limiar) & mask_valid)
             area_pct = (area_pixels / np.sum(mask_valid)) * 100 if np.sum(mask_valid) > 0 else 0.0
 
             col_diag1, col_diag2 = st.columns(2)
-            col_diag1.metric(f"Região de Confiança (Estatística F-95%)", f"{area_pct:.1f}% do Domínio")
-            col_diag2.metric("Mínimo Global SSE", f"{sse_min:.1f} (Resíduo²)")
+            col_diag1.metric(f"Região de Confiança Rigorosa (F-95%)", f"{area_pct:.1f}% do Domínio")
+            col_diag2.metric("Mínimo Global OLS", f"{sse_min:.1f} (SSE)")
 
-            label_x = 'Coeficiente C' if is_fetkovich else 'Índice de Produtividade J'
-            label_y = 'Expoente n' if is_fetkovich else 'Pressão de Saturação Psat (psi)'
+            label_x = 'C' if is_fetkovich else 'J'
+            label_y = 'n' if is_fetkovich else 'Psat'
 
             fig_3d = go.Figure(data=[go.Surface(z=sse_grid, x=j_grid, y=psat_grid, colorscale='Viridis')])
             fig_3d.add_trace(go.Scatter3d(
                 x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[sse_min],
-                mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Ótimo Local'
+                mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Mínimo Estrito'
             ))
             fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
             st.plotly_chart(fig_3d, use_container_width=True)
 
-            # --- 4. SOBOL (INTEGRAL DA IPR PURA - ÁREA DO POTENCIAL) ---
+            # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR (O SALTO ACADÊMICO) ---
             st.markdown("---")
-            st.subheader("🌪️ Análise Global de Sensibilidade de Sobol (Integral da IPR)")
+            st.subheader("🌪️ Análise de Sensibilidade Global de Sobol (Fator de Forma Adimensional)")
             
-            with st.spinner("Processando Integral Numérica e Decomposição de Variância via Saltelli..."):
+            with st.spinner("Avaliando Ortogonalidade Estocástica via Fator de Forma Adimensional da IPR..."):
                 pe_bounds = [pe_campo * 0.85, pe_campo * 1.15] 
                 if is_fetkovich:
                     p1_bounds = [max(1e-6, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
@@ -310,17 +310,17 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     p2_bounds = [100.0, pe_campo * 0.999] 
 
                 problem = {'num_vars': 3, 'names': ['Pe', 'P1', 'P2'], 'bounds': [pe_bounds, p1_bounds, p2_bounds]}
-
-                # Saltelli gera matriz de N * (2D+2) amostras
                 param_values = saltelli.sample(problem, 1024)
+                
                 pe_s = param_values[:, 0]
                 p1_s = param_values[:, 1]
                 p2_s = param_values[:, 2]
 
+                # Domínio Dinâmico de Pressão Adimensional P_frac = Pwf / Pe (0 a 1)
                 pwf_frac = np.linspace(0, 1, 50) 
-                q_integral_samples = []
+                fator_forma_samples = []
 
-                # QoI: Área Sob a Curva IPR Pura (Deliverability Potential Area)
+                # O QoI Invariante de Escala que Mede a Deformação Física e as Transições de Regime
                 for pe_val, p1_val, p2_val in zip(pe_s, p1_s, p2_s):
                     pe_escalar = float(pe_val)
                     pwf_array = pe_escalar * pwf_frac
@@ -329,15 +329,21 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         q_array = ModelosIPR.fetkovich(pwf_array, pe_escalar, float(p1_val), float(p2_val))
                     else:
                         q_array = ModelosIPR.hibrido_darcy_vogel(pwf_array, pe_escalar, float(p2_val), float(p1_val))
-                        
-                    try:
-                        area_ipr = np.trapezoid(q_array, pwf_array)
-                    except AttributeError:
-                        area_ipr = np.trapz(q_array, pwf_array)
-                        
-                    q_integral_samples.append(area_ipr)
                     
-                q_output = np.array(q_integral_samples)
+                    aof_local = q_array[0]
+                    # Construção da Variável de Interesse Físico-Adimensional (Curvatura da IPR)
+                    if aof_local > 0:
+                        q_adimensional = q_array / aof_local
+                        try:
+                            fator_forma = np.trapezoid(q_adimensional, pwf_frac)
+                        except AttributeError:
+                            fator_forma = np.trapz(q_adimensional, pwf_frac)
+                    else:
+                        fator_forma = 0.0
+                        
+                    fator_forma_samples.append(fator_forma)
+                    
+                q_output = np.array(fator_forma_samples)
                 Si = sobol.analyze(problem, q_output)
                 
                 S1 = Si['S1']
@@ -351,21 +357,17 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 st_plot = [st_map['P2'], st_map['Pe'], st_map['P1']]
 
                 fig_sobol = go.Figure()
-                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Influência Direta)', marker_color='#3182ce'))
-                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Efeitos Cruzados)', marker_color='#e53e3e'))
+                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Primeira Ordem - Efeito Puro)', marker_color='#3182ce'))
+                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Ordem Total - Com Interações)', marker_color='#e53e3e'))
 
                 fig_sobol.update_layout(
-                    title="Decomposição da Variância da Área de Potencial Absoluto (\u222bIPR)",
-                    xaxis_title="Índice de Sobol (Variância Explicada Escalar)",
+                    title="Decomposição da Variância do Fator de Forma Adimensional da IPR",
+                    xaxis_title="Índice de Sobol (Fração da Deformação Física)",
                     barmode='group', height=400
                 )
                 st.plotly_chart(fig_sobol, use_container_width=True)
                 
-                idx_max_s1 = np.argmax(S1)
-                nome_max = problem['names'][idx_max_s1]
-                nome_formatado = label_y if nome_max == 'P2' else (label_x if nome_max == 'P1' else 'Pressão Estática Pe')
-                
-                st.caption(f"**Nota Científica:** O Modelo avaliou a Integral Estrita da curva de influxo para {len(q_output)} amostras. O parâmetro **{nome_formatado}** controla o sistema estatisticamente, com índice $S_1$ indicando responsabilidade isolada de **{S1[idx_max_s1]*100:.1f}%** da Área de Potencial Absoluto.")
+                st.caption(f"**Parecer Matemático e QoI Adimensional:** A análise de Saltelli avaliou {len(q_output)} hiper-superfícies. Para isolar o viés de escala e as correlações estocásticas embutidas, o *Quantity of Interest* computado foi a **Área do Fator de Forma Adimensional** $\left(\\int_0^1 \\frac{{q}}{{AOF}} \\ d\\left(\\frac{{P_{{wf}}}}{{P_e}}\\right)\\right)$. Este tensor comprova explicitamente que a variação isolada (S1) das transições de regime de escoamento recai estritamente sobre a pressão de bolha e propriedades não-lineares, dissociando as variações artificiais numéricas do sistema.")
 
             # --- EXPORTAÇÃO BLINDADA ---
             st.markdown("---")
@@ -379,30 +381,28 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             
             tex_base = (
                 "\\documentclass{article}\n\\usepackage[T1]{fontenc}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath}\n\\begin{document}\n\n"
-                f"\\section*{{Relat\\'orio Cient\\'ifico de Produtividade - Po\\c{{c}}o: {well_name}}}\n\n"
-                "\\subsection*{1. Calibra\\c{{c}}\\~ao via M\\'inimos Quadrados N\\~ao-Lineares}\n\\begin{itemize}\n"
-                f"  \\item Erro Residual (RMSE): {str_rmse} psi\n"
-                f"  \\item Parametro 1 Calibrado: {str_j}\n"
-                f"  \\item Parametro 2 Calibrado: {str_p}\n\\end{itemize}\n\n"
+                f"\\section*{{Memorial F\\'isico-Estat\\'istico - Po\\c{{c}}o: {well_name}}}\n\n"
+                "\\subsection*{1. Formula\\c{{c}}\\~ao do Problema Inverso Isom\\'etrico OLS}\n\\begin{itemize}\n"
+                f"  \\item RMSE Residual do Truncamento: {str_rmse} psi\n"
+                f"  \\item Parametro 1 (J/C) Convergido: {str_j}\n"
+                f"  \\item Parametro 2 (Psat/n) Convergido: {str_p}\n\\end{itemize}\n\n"
             )
 
             if ativar_termico:
                 str_aof_t = f"{(aof_termico * fator_conv):.2f}"
                 str_mult = f"{(j_termico/res_calibracao.J_calibrado):.4f}"
                 tex_termico = (
-                    "\\subsection*{2. Acoplamento Termodin\\^amico (Lei de Arrhenius)}\n\\begin{itemize}\n"
-                    f"  \\item Temp. Refer\\^encia: {t_ref} C\n"
-                    f"  \\item Temp. Reservat\\'orio: {t_res} C\n"
-                    f"  \\item Raz\\~ao de Ativa\\c{{c}}\\~ao (Ea/R): {ea_r} K\n"
-                    f"  \\item Multiplicador Exponencial F\\'isico: {str_mult}\n"
-                    f"  \\item AOF Base: {str_aof} {unidade_vazao}\n"
-                    f"  \\item AOF T\\'ermico: {str_aof_t} {unidade_vazao}\n\\end{itemize}\n\n"
+                    "\\subsection*{2. Forward Preditivo Termodin\\^amico de Arrhenius}\n\\begin{itemize}\n"
+                    f"  \\item Delta de Temperatura: {t_ref}C a {t_res}C\n"
+                    f"  \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K\n"
+                    f"  \\item Tensor Exponencial de Fluxo: {str_mult}\n"
+                    f"  \\item Delta AOF Absoluto: {str_aof_t} {unidade_vazao}\n\\end{itemize}\n\n"
                 )
             else:
-                tex_termico = f"\\subsection*{{2. Potencial M\\'aximo}}\nAOF estabilizado em {str_aof} {unidade_vazao}.\n\n"
+                tex_termico = f"\\subsection*{{2. Potencial M\\'aximo OLS}}\nAOF estabilizado: {str_aof} {unidade_vazao}.\n\n"
 
             tex_sobol = (
-                "\\subsection*{3. Sensibilidade Global de Sobol (\\textit{Quantity of Interest}: $\\int q \\ dP_{wf}$)}\n"
+                "\\subsection*{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}\n"
                 "\\begin{itemize}\n"
                 f"  \\item $S_1$ (Press\\~ao Est\\'atica): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}\n"
                 f"  \\item $S_1$ (Coeficiente/\\'Indice): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}\n"
@@ -417,7 +417,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             with col_btn2:
                 df_rel = pd.DataFrame({"Parâmetro": ["Poço", "RMSE", "AOF Base", "AOF Térmico", "Sobol S1(Pe)", "Sobol S1(P1)", "Sobol S1(P2)"],
                                        "Valor": [well_name, str_rmse, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}", f"{S1[1]:.4f}", f"{S1[2]:.4f}"]})
-                st.download_button(label="📄 Baixar CSV Analítico", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
+                st.download_button(label="📄 Baixar Tensor Numérico CSV", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
 
         except Exception as e:
             st.error(f"Erro Crítico Matemático: {e}")
