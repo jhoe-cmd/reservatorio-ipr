@@ -295,7 +295,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 )
                 st.plotly_chart(fig_tornado, use_container_width=True)
 
-                # --- EXPORTAÇÃO EM LATEX TOTALMENTE DINÂMICA (PILAR 1) ---
+              # --- EXPORTAÇÃO EM LATEX TOTALMENTE DINÂMICA (PILAR 1) ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
@@ -329,6 +329,34 @@ Desse modo, a expans\\~ao parab\\^olica inferior fica descrita matematicamente p
     q = q_b + \\frac{{{res_calibracao.J_calibrado:.4f} \\times {res_calibracao.Psat_calibrado:.2f}}}{{1.8}} \\left[ 1 - 0.2\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right) - 0.8\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right)^2 \\right]
 \\end{{equation}}"""
 
+                # Bloco dinâmico da Dissertação (Só entra se o Térmico estiver ativo)
+                if ativar_termico:
+                    tex_termico = f"""
+\\subsection*{{3. Acoplamento T\\'ermico e An\\'alise de Sensibilidade}}
+A fim de avaliar o impacto da temperatura na produtividade do po\\c{{c}}o, o modelo foi submetido a uma perturba\\c{{c}}\\~ao termodin\\^amica, validando a premissa de propriedades n\\~ao-est\\'aticas.
+\\begin{{itemize}}
+    \\item Temperatura de Refer\\^encia PVT: {t_ref:.1f} $^{\\circ}$C
+    \\item Temperatura do Reservat\\'orio: {t_res:.1f} $^{\\circ}$C
+    \\item Perturba\\c{{c}}\\~ao Induzida nas Propriedades: {incerteza_pct:+.1f}\\%
+    \\item Multiplicador Final de Desempenho T\\'ermico: {(j_termico/res_calibracao.J_calibrado):.4f}
+\\end{{itemize}}
+
+\\subsection*{{4. Capacidade de Produ\\c{{c}}\\~ao M\\'axima (AOF Comparativo)}}
+Avaliando o limite de escoamento absoluto sob press\\~ao de fundo nula ($P_{{wf}} = 0$), observou-se a seguinte varia\\c{{c}}\\~ao devido ao gradiente t\\'ermico:
+\\begin{{itemize}}
+    \\item AOF Original (Isot\\'ermico): {aof_plot:.2f} \\text{{ {unidade_vazao}}}
+    \\item AOF Corrigido (T\\'ermico): {(aof_termico * fator_conv):.2f} \\text{{ {unidade_vazao}}}
+    \\item \\textbf{{Delta de Produ\\c{{c}}\\~ao T\\'ermica:}} {((aof_termico - aof_base) * fator_conv):+.2f} \\text{{ {unidade_vazao}}}
+\\end{{itemize}}"""
+                else:
+                    tex_termico = f"""
+\\subsection*{{3. Capacidade de Produ\\c{{c}}\\~ao M\\'axima (AOF)}}
+Avaliando o limite de escoamento absoluto sob press\\~ao de fundo nula ($P_{{wf}} = 0$), o \\textit{{Absolute Open Flow}} resultante estabiliza em:
+\\begin{{equation}}
+    AOF = {aof_plot:.2f} \\text{{ {unidade_vazao}}}
+\\end{{equation}}"""
+
+                # Montagem final do arquivo LaTeX
                 latex_content = f"""\\documentclass{{article}}
 \\usepackage[T1]{{fontenc}}
 \\usepackage[utf8]{{inputenc}}
@@ -347,12 +375,7 @@ A calibra\\c{{c}}\\~ao num\\'erica foi processada via algoritmo \\textit{{Trust 
     \\item Erro Residual de Ajuste (RMSE): {getattr(res_calibracao, 'rmse', 0.0):.2f} psi
 \\end{{itemize}}
 {tex_equacao}
-
-\\subsection*{{3. Capacidade de Produ\\c{{c}}\\~ao M\\'axima (AOF)}}
-Avaliando o limite de escoamento absoluto sob press\\~ao de fundo nula ($P_{{wf}} = 0$), o \\textit{{Absolute Open Flow}} resultante estabiliza em:
-\\begin{{equation}}
-    AOF = {aof_plot:.2f} \\text{{ {unidade_vazao}}}
-\\end{{equation}}
+{tex_termico}
 
 \\end{{document}}
 """
@@ -367,8 +390,18 @@ Avaliando o limite de escoamento absoluto sob press\\~ao de fundo nula ($P_{{wf}
                     )
                 with col_btn2:
                     df_relatorio = pd.DataFrame({
-                        "Parâmetro": ["Poço", "Modelo", "Pe (psi)", "P1 Calibrado", "P2 Calibrado", "AOF"],
-                        "Valor": [well_name, modelo_escolhido, f"{pe_campo:.1f}", f"{res_calibracao.J_calibrado:.5f}", f"{res_calibracao.Psat_calibrado:.2f}", f"{aof_plot:.1f}"]
+                        "Parâmetro": ["Poço", "Modelo", "Pe (psi)", "P1 Calibrado", "P2 Calibrado", "RMSE (psi)", "AOF Base", "AOF Térmico", "Delta Térmico"],
+                        "Valor": [
+                            well_name, 
+                            modelo_escolhido, 
+                            f"{pe_campo:.1f}", 
+                            f"{res_calibracao.J_calibrado:.5f}", 
+                            f"{res_calibracao.Psat_calibrado:.2f}", 
+                            f"{getattr(res_calibracao, 'rmse', 0.0):.2f}", 
+                            f"{aof_plot:.1f}", 
+                            f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", 
+                            f"{((aof_termico - aof_base) * fator_conv):+.1f}" if ativar_termico else "-"
+                        ]
                     })
                     csv_data = df_relatorio.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
                     st.download_button(
