@@ -67,38 +67,22 @@ class HistoryMatchingService:
         class ResResultado: pass
         res = ResResultado()
         
-        # --- CORREÇÃO DE BOUNDS DO CHUTE INICIAL (Prevenção do Erro Crítico) ---
         if is_fetkovich:
-            # Clamping do chute para garantir que esteja dentro de [0.5, 1.0] e J > 1e-6
-            p1_start = max(1e-6, param1_guess)
-            p2_start = np.clip(param2_guess, 0.5, 1.0)
-            
             def res_func(p):
                 return ModelosIPR.fetkovich(pwf_medidos, Pe, p[0], p[1]) - q_medidos
-                
-            opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 0.5], [np.inf, 1.0]), method='trf')
+            opt = least_squares(res_func, [param1_guess, param2_guess], bounds=([1e-6, 0.5], [np.inf, 1.0]), method='trf')
             res.J_calibrado, res.Psat_calibrado = opt.x
-            
         else:
-            p1_start = max(1e-6, param1_guess)
-            
             if param2_conhecido is not None:
-                # Se Psat for travada e o usuário informou um valor fora da física, nós o "empurramos" para o limite
-                psat_fixa = min(param2_conhecido, Pe * 0.99)
                 def res_func(p):
-                    return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, psat_fixa, p[0]) - q_medidos
-                    
-                opt = least_squares(res_func, [p1_start], bounds=([1e-6], [np.inf]), method='trf')
+                    return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, param2_conhecido, p[0]) - q_medidos
+                opt = least_squares(res_func, [param1_guess], bounds=([1e-6], [np.inf]), method='trf')
                 res.J_calibrado = opt.x[0]
-                res.Psat_calibrado = psat_fixa
+                res.Psat_calibrado = param2_conhecido
             else:
-                # Clamping do chute inicial da Psat para garantir que esteja entre [14.7, 99% da Pe]
-                p2_start = np.clip(param2_guess, 14.7, Pe * 0.99)
-                
                 def res_func(p):
                     return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, p[1], p[0]) - q_medidos
-                    
-                opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 14.7], [np.inf, Pe * 0.999]), method='trf')
+                opt = least_squares(res_func, [param1_guess, param2_guess], bounds=([1e-6, 14.7], [np.inf, Pe * 0.999]), method='trf')
                 res.J_calibrado, res.Psat_calibrado = opt.x
                 
         res.rmse = np.sqrt(np.mean(opt.fun**2))
@@ -158,6 +142,9 @@ PRESETS_POCOS = {
     },
     "Caso 3: Convencional (Transição Darcy-Vogel)": {
         "Pe": 5000.0, "Pwf": [4500.0, 4000.0, 2500.0, 1500.0], "Q": [750.0, 1500.0, 3560.0, 4490.0]
+    },
+    "Caso 4: Gás/Turbulência (Preset Fetkovich)": {
+        "Pe": 4000.0, "Pwf": [3500.0, 3000.0, 2000.0, 1000.0], "Q": [2000.0, 3500.0, 5800.0, 7200.0]
     }
 }
 
@@ -339,6 +326,10 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
                 st.plotly_chart(fig_3d, use_container_width=True)
 
+                # Inicializa S1 e ST vazios para garantir segurança na exportação se o térmico estiver desligado
+                S1 = [0.0, 0.0, 0.0]
+                ST = [0.0, 0.0, 0.0]
+
                 # --- 4. SOBOL - FOCADO EXCLUSIVAMENTE NO CAMPO TÉRMICO ---
                 if ativar_termico:
                     st.markdown("---")
@@ -470,14 +461,16 @@ AOF estabilizado: {str_aof} {unidade_vazao}.
 
 """
 
-                latex_content = tex_base + tex_termico + "\\end{document}\n"
+                tex_sobol = "" 
+                
+                latex_content = tex_base + tex_termico + tex_sobol + "\\end{document}\n"
 
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
                     st.download_button(label="🖩 Baixar Memorial LaTeX", data=latex_content, file_name=f"memorial_{well_name}.tex")
                 with col_btn2:
                     df_rel = pd.DataFrame({"Parâmetro": ["Poço", "RMSE", "AOF Base", "AOF Térmico", "Sobol S1(T_res)", "Sobol S1(T_ref)", "Sobol S1(Ea_R)"],
-                                           "Valor": [well_name, str_rmse, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}" if ativar_termico else "-", f"{S1[1]:.4f}" if ativar_termico else "-", f"{S1[2]:.4f}" if ativar_termico else "-"]})
+                                           "Valor": [well_name, str_rmse, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}", f"{S1[1]:.4f}", f"{S1[2]:.4f}"]})
                     st.download_button(label="📄 Baixar Tensor Numérico CSV", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
 
             except Exception as e:
