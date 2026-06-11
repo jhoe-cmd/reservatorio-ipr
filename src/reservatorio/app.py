@@ -9,6 +9,15 @@ import plotly.graph_objects as go
 import scipy.stats as stats
 from scipy.optimize import least_squares
 
+# --- IMPORTAÇÕES DA NOSSA NOVA ARQUITETURA ---
+from reservatorio.domain.ipr_models import ModelosIPR
+from reservatorio.domain.calibration import DarcyVogelCalibration, FetkovichCalibration
+from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
+from reservatorio.infrastructure.repositories import JsonCalibrationRepository
+from reservatorio.application.optimization import HistoryMatchingService
+from reservatorio.application.montecarlo import MonteCarloIPR
+from reservatorio.infrastructure.interface_entrada import InterfaceEntradaDados
+
 # --- IMPORTAÇÃO ACADÊMICA: ÍNDICES DE SOBOL ---
 try:
     from SALib.sample import saltelli
@@ -23,7 +32,6 @@ except ImportError:
 class ModelosIPR:
     @staticmethod
     def hibrido_darcy_vogel(pwf, pe, psat, j):
-        """Modelo 100% tensorial c/ suporte a broadcasting 3D e clamps estritos."""
         pwf = np.asarray(pwf)
         q = np.zeros_like(pwf, dtype=float)
         
@@ -55,7 +63,6 @@ class ModelosIPR:
 class CorretorTermico:
     @staticmethod
     def ajustar_indice_J(j_base, t_res, t_ref, ea_r):
-        """Correção Termodinâmica Forward via Lei de Arrhenius (Predição Estrita)"""
         tk_res = t_res + 273.15
         tk_ref = t_ref + 273.15
         multiplicador_exponencial = np.exp(-ea_r * ((1.0 / tk_res) - (1.0 / tk_ref)))
@@ -69,7 +76,6 @@ class HistoryMatchingService:
         class ResResultado: pass
         res = ResResultado()
         
-        # Problema Inverso Isométrico Estrito (Garantia de Identificabilidade Base)
         if is_fetkovich:
             def res_func(p):
                 return ModelosIPR.fetkovich(pwf_medidos, Pe, p[0], p[1]) - q_medidos
@@ -93,10 +99,7 @@ class HistoryMatchingService:
 
 @st.cache_data
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
-    """
-    Geração Hiper-Rápida do Tensor de Erros O(1) usando Broadcasting do NumPy.
-    """
-    res_malha = 100j # 10.000 pontos nodais avaliados simultaneamente
+    res_malha = 100j 
     
     if is_fetkovich:
         j_grid, psat_grid = np.mgrid[max(1e-6, j_opt*0.2):j_opt*2.0:res_malha, 0.5:1.0:res_malha]
@@ -122,9 +125,10 @@ def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fe
     return j_grid, psat_grid, sse_grid, sse_min
 
 # ==============================================================================
-# CAMADA DE APRESENTAÇÃO (Streamlit UI)
+# CAMADA DE APRESENTAÇÃO E INTEGRAÇÃO DE ENTRADA DE DADOS
 # ==============================================================================
 PRESETS_POCOS = {
+    "Entrada Manual / Tabela": None,
     "Caso 1: Pré-Sal (Monofásico - Não Identificável)": {
         "Pe": 6500.0, "Pwf": [6000.0, 5500.0, 5000.0, 4500.0], "Q": [600.0, 1200.0, 1800.0, 2400.0]
     },
@@ -150,9 +154,11 @@ st.markdown("Pipeline analítico com otimização TRF, termodinâmica Arrhenius 
 
 st.sidebar.header("📚 Carregar Cenário Experimental")
 cenario_escolhido = st.sidebar.selectbox("Preset:", list(PRESETS_POCOS.keys()))
-well_name = st.sidebar.text_input("Identificador do Poço", value=cenario_escolhido.split(":")[0])
 
-pe_default = PRESETS_POCOS[cenario_escolhido]["Pe"]
+nome_padrao = cenario_escolhido.split(":")[0] if cenario_escolhido != "Entrada Manual / Tabela" else "Poço-Pre-Sal-01"
+well_name = st.sidebar.text_input("Identificador do Poço", value=nome_padrao)
+
+pe_default = PRESETS_POCOS[cenario_escolhido]["Pe"] if PRESETS_POCOS[cenario_escolhido] else 6200.0
 pe_campo = st.sidebar.number_input("Pressão Estática Pe (psi)", value=pe_default, step=100.0)
 
 modelo_escolhido = st.sidebar.radio("Modelo Físico", ["Darcy-Vogel Híbrido", "Fetkovich"])
@@ -186,193 +192,208 @@ ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0
 if st.sidebar.button("🗑️ Limpar Gráficos"):
     st.session_state["ghost_curves"] = []
 
+# ==============================================================================
+# ENTRADA DE DADOS E VALIDAÇÃO (O BLOCO QUE ESTAVA FALTANDO)
+# ==============================================================================
+if cenario_escolhido == "Entrada Manual / Tabela":
+    df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
+    dados_validos, pwf_campo, q_campo = InterfaceEntradaDados.validar_dados(df_dados_poco)
+else:
+    st.success(f"✅ Dados sintéticos carregados automaticamente para: **{cenario_escolhido}**")
+    pwf_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Pwf"])
+    q_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Q"])
+    dados_validos = True
+    st.write("📊 **Dados de Teste de Campo Carregados:**")
+    st.dataframe(pd.DataFrame({"Pwf (psi)": pwf_campo, f"Vazão ({unidade_vazao})": q_campo * fator_conv}), hide_index=True)
+
+
 if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_disponivel:
-    with st.spinner("Resolvendo Sistema Tensorial e Estatístico..."):
-        try:
-            pwf_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Pwf"])
-            q_campo = np.array(PRESETS_POCOS[cenario_escolhido]["Q"])
-            
-            # --- 1. HISTORY MATCHING TRF (Isotérmico Base) ---
-            hm_service = HistoryMatchingService()
-            res_calibracao = hm_service.calibrar(
-                well_name, pwf_campo, q_campo, pe_campo, 
-                param1_guess, param2_guess, param2_conhecido, is_fetkovich
-            )
-
-            st.subheader("Resultados da Minimização de Erros OLS")
-            col1, col2, col3 = st.columns(3)
-            
-            if is_fetkovich:
-                col1.metric("C Base", f"{res_calibracao.J_calibrado:.6f}")
-                col2.metric("n Otimizado", f"{res_calibracao.Psat_calibrado:.3f}")
-            else:
-                col1.metric("J Base", f"{res_calibracao.J_calibrado:.4f} STB/d/psi")
-                col2.metric("Psat Otimizada", f"{res_calibracao.Psat_calibrado:.1f} psi")
-            col3.metric("RMSE Residual", f"{res_calibracao.rmse:.2f} psi")
-
-            # --- 2. CURVA IPR E FORWARD TÉRMICO ---
-            pwf_arr = np.linspace(pe_campo, 0, 100)
-            
-            if is_fetkovich:
-                q_arr_base = ModelosIPR.fetkovich(pwf_arr, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
-                aof_base = ModelosIPR.fetkovich(0.0, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
-            else:
-                q_arr_base = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
-                aof_base = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
-
-            if ativar_termico:
-                j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, ea_r)
-                if is_fetkovich:
-                    q_arr_termico = ModelosIPR.fetkovich(pwf_arr, pe_campo, j_termico, res_calibracao.Psat_calibrado)
-                    aof_termico = ModelosIPR.fetkovich(0.0, pe_campo, j_termico, res_calibracao.Psat_calibrado)
-                else:
-                    q_arr_termico = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, j_termico)
-                    aof_termico = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, j_termico)
-            else:
-                aof_termico = aof_base 
-
-            q_arr_plot = q_arr_base * fator_conv
-            aof_plot = aof_base * fator_conv # Correção da Variável Ausente
-            q_arr_plot_t = q_arr_termico * fator_conv if ativar_termico else q_arr_plot
-            
-            st.session_state["ghost_curves"].append({"name": f"{well_name}", "q": q_arr_plot, "pwf": pwf_arr})
-
-            fig_ipr, ax = plt.subplots(figsize=(10, 5))
-            for ghost in st.session_state["ghost_curves"][:-1]:
-                ax.plot(ghost["q"], ghost["pwf"], color='gray', alpha=0.3, linestyle='--')
-            
-            ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base OLS (AOF: {aof_plot:.0f})')
-            if ativar_termico:
-                ax.plot(q_arr_plot_t, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', label=f'IPR Predição Térmica (AOF: {aof_termico*fator_conv:.0f})')
-            ax.scatter(q_campo * fator_conv, pwf_campo, color='black', zorder=5, label='Dados Experimentais')
-            ax.set_title("Curvas de Desempenho e Acoplamento Preditivo de Arrhenius")
-            ax.set_xlabel(f"Vazão de Produção ({unidade_vazao})")
-            ax.set_ylabel("Pwf Dinâmica (psi)")
-            ax.set_ylim(0, pe_campo + 500)
-            limite_x = max(aof_termico * fator_conv, aof_plot) * 1.1
-            ax.set_xlim(0, limite_x)
-            ax.grid(True, linestyle=':')
-            ax.legend()
-            st.pyplot(fig_ipr)
-
-            # --- 3. DIAGNÓSTICO DE IDENTIFICABILIDADE VETORIZADO ---
-            st.markdown("---")
-            st.subheader("🔍 Espaço Paramétrico e Topografia de Verossimilhança")
-            
-            j_grid, psat_grid, sse_grid, sse_min = calcular_sse_matriz_exata(
-                pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich
-            )
-
-            N_dados = len(pwf_campo)
-            p_livres = 2 if (is_fetkovich or not travar_psat) else 1
-            v_df = N_dados - p_livres
-            
-            if v_df > 0:
-                f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
-                sse_limiar = sse_min * (1.0 + (float(p_livres) / v_df) * f_95)
-            else:
-                sse_limiar = sse_min 
-                
-            mask_valid = ~np.isnan(sse_grid)
-            area_pixels = np.sum((sse_grid <= sse_limiar) & mask_valid)
-            area_pct = (area_pixels / np.sum(mask_valid)) * 100 if np.sum(mask_valid) > 0 else 0.0
-
-            col_diag1, col_diag2 = st.columns(2)
-            col_diag1.metric(f"Região de Confiança Rigorosa (F-95%)", f"{area_pct:.1f}% do Domínio")
-            col_diag2.metric("Mínimo Global OLS", f"{sse_min:.1f} (SSE)")
-
-            label_x = 'C' if is_fetkovich else 'J'
-            label_y = 'n' if is_fetkovich else 'Psat'
-
-            fig_3d = go.Figure(data=[go.Surface(z=sse_grid, x=j_grid, y=psat_grid, colorscale='Viridis')])
-            fig_3d.add_trace(go.Scatter3d(
-                x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[sse_min],
-                mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Mínimo Estrito'
-            ))
-            fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
-            st.plotly_chart(fig_3d, use_container_width=True)
-
-            # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR ---
-            st.markdown("---")
-            st.subheader("🌪️ Análise de Sensibilidade Global de Sobol (Fator de Forma Adimensional)")
-            
-            with st.spinner("Avaliando Ortogonalidade Estocástica via Fator de Forma Adimensional da IPR..."):
-                pe_bounds = [pe_campo * 0.85, pe_campo * 1.15] 
-                if is_fetkovich:
-                    p1_bounds = [max(1e-6, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
-                    p2_bounds = [0.5, 1.0] 
-                else:
-                    p1_bounds = [max(1e-3, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
-                    p2_bounds = [100.0, pe_campo * 0.999] 
-
-                problem = {'num_vars': 3, 'names': ['Pe', 'P1', 'P2'], 'bounds': [pe_bounds, p1_bounds, p2_bounds]}
-                param_values = saltelli.sample(problem, 1024)
-                
-                pe_s = param_values[:, 0]
-                p1_s = param_values[:, 1]
-                p2_s = param_values[:, 2]
-
-                pwf_frac = np.linspace(0, 1, 50) 
-                fator_forma_samples = []
-
-                for pe_val, p1_val, p2_val in zip(pe_s, p1_s, p2_s):
-                    pe_escalar = float(pe_val)
-                    pwf_array = pe_escalar * pwf_frac
-                    
-                    if is_fetkovich:
-                        q_array = ModelosIPR.fetkovich(pwf_array, pe_escalar, float(p1_val), float(p2_val))
-                    else:
-                        q_array = ModelosIPR.hibrido_darcy_vogel(pwf_array, pe_escalar, float(p2_val), float(p1_val))
-                    
-                    aof_local = q_array[0]
-                    if aof_local > 0:
-                        q_adimensional = q_array / aof_local
-                        try:
-                            fator_forma = np.trapezoid(q_adimensional, pwf_frac)
-                        except AttributeError:
-                            fator_forma = np.trapz(q_adimensional, pwf_frac)
-                    else:
-                        fator_forma = 0.0
-                        
-                    fator_forma_samples.append(fator_forma)
-                    
-                q_output = np.array(fator_forma_samples)
-                Si = sobol.analyze(problem, q_output)
-                
-                S1 = Si['S1']
-                ST = Si['ST']
-                
-                s1_map = dict(zip(problem['names'], S1))
-                st_map = dict(zip(problem['names'], ST))
-                
-                labels_tornado = [label_y, 'Pressão Estática Pe', label_x]
-                s1_plot = [s1_map['P2'], s1_map['Pe'], s1_map['P1']]
-                st_plot = [st_map['P2'], st_map['Pe'], st_map['P1']]
-
-                fig_sobol = go.Figure()
-                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Primeira Ordem - Efeito Puro)', marker_color='#3182ce'))
-                fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Ordem Total - Com Interações)', marker_color='#e53e3e'))
-
-                fig_sobol.update_layout(
-                    title="Decomposição da Variância do Fator de Forma Adimensional da IPR",
-                    xaxis_title="Índice de Sobol (Fração da Deformação Física)",
-                    barmode='group', height=400
+    if not dados_validos:
+        st.error("Por favor, preencha a tabela com pelo menos 3 pontos numéricos válidos antes de rodar a simulação.")
+    else:
+        with st.spinner("Resolvendo Sistema Tensorial e Estatístico..."):
+            try:
+                # --- 1. HISTORY MATCHING TRF (Isotérmico Base) ---
+                hm_service = HistoryMatchingService()
+                res_calibracao = hm_service.calibrar(
+                    well_name, pwf_campo, q_campo, pe_campo, 
+                    param1_guess, param2_guess, param2_conhecido, is_fetkovich
                 )
-                st.plotly_chart(fig_sobol, use_container_width=True)
-                
-                st.caption(f"**Parecer Matemático:** Avaliadas {len(q_output)} hiper-superfícies de Saltelli. A Variável de Interesse Físico (QoI) isolou o viés de escala parametrizando a Área do Fator Adimensional. O tensor comprova que as transições de regime recaem estritamente sobre propriedades não-lineares, dissociando as variações artificiais numéricas do sistema.")
 
-            # --- EXPORTAÇÃO BLINDADA EM LATEX MULTILINE ---
-            st.markdown("---")
-            st.subheader("📥 Geração de Relatório Físico-Estatístico")
-            
-            str_j = f"{res_calibracao.J_calibrado:.4f}"
-            str_p = f"{res_calibracao.Psat_calibrado:.2f}"
-            str_pe = f"{pe_campo:.2f}"
-            str_rmse = f"{getattr(res_calibracao, 'rmse', 0.0):.2f}"
-            str_aof = f"{aof_plot:.2f}"
-            
-            tex_base = f"""\\documentclass{{article}}
+                st.subheader("Resultados da Minimização de Erros OLS")
+                col1, col2, col3 = st.columns(3)
+                
+                if is_fetkovich:
+                    col1.metric("C Base", f"{res_calibracao.J_calibrado:.6f}")
+                    col2.metric("n Otimizado", f"{res_calibracao.Psat_calibrado:.3f}")
+                else:
+                    col1.metric("J Base", f"{res_calibracao.J_calibrado:.4f} STB/d/psi")
+                    col2.metric("Psat Otimizada", f"{res_calibracao.Psat_calibrado:.1f} psi")
+                col3.metric("RMSE Residual", f"{res_calibracao.rmse:.2f} psi")
+
+                # --- 2. CURVA IPR E FORWARD TÉRMICO ---
+                pwf_arr = np.linspace(pe_campo, 0, 100)
+                
+                if is_fetkovich:
+                    q_arr_base = ModelosIPR.fetkovich(pwf_arr, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
+                    aof_base = ModelosIPR.fetkovich(0.0, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
+                else:
+                    q_arr_base = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
+                    aof_base = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
+
+                if ativar_termico:
+                    j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, ea_r)
+                    if is_fetkovich:
+                        q_arr_termico = ModelosIPR.fetkovich(pwf_arr, pe_campo, j_termico, res_calibracao.Psat_calibrado)
+                        aof_termico = ModelosIPR.fetkovich(0.0, pe_campo, j_termico, res_calibracao.Psat_calibrado)
+                    else:
+                        q_arr_termico = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, j_termico)
+                        aof_termico = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, j_termico)
+                else:
+                    aof_termico = aof_base 
+
+                q_arr_plot = q_arr_base * fator_conv
+                aof_plot = aof_base * fator_conv
+                q_arr_plot_t = q_arr_termico * fator_conv if ativar_termico else q_arr_plot
+                
+                st.session_state["ghost_curves"].append({"name": f"{well_name}", "q": q_arr_plot, "pwf": pwf_arr})
+
+                fig_ipr, ax = plt.subplots(figsize=(10, 5))
+                for ghost in st.session_state["ghost_curves"][:-1]:
+                    ax.plot(ghost["q"], ghost["pwf"], color='gray', alpha=0.3, linestyle='--')
+                
+                ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base OLS (AOF: {aof_plot:.0f})')
+                if ativar_termico:
+                    ax.plot(q_arr_plot_t, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', label=f'IPR Predição Térmica (AOF: {aof_termico*fator_conv:.0f})')
+                ax.scatter(q_campo * fator_conv, pwf_campo, color='black', zorder=5, label='Dados Experimentais')
+                ax.set_title("Curvas de Desempenho e Acoplamento Preditivo de Arrhenius")
+                ax.set_xlabel(f"Vazão de Produção ({unidade_vazao})")
+                ax.set_ylabel("Pwf Dinâmica (psi)")
+                ax.set_ylim(0, pe_campo + 500)
+                limite_x = max(aof_termico * fator_conv, aof_plot) * 1.1
+                ax.set_xlim(0, limite_x)
+                ax.grid(True, linestyle=':')
+                ax.legend()
+                st.pyplot(fig_ipr)
+
+                # --- 3. DIAGNÓSTICO DE IDENTIFICABILIDADE VETORIZADO ---
+                st.markdown("---")
+                st.subheader("🔍 Espaço Paramétrico e Topografia de Verossimilhança")
+                
+                j_grid, psat_grid, sse_grid, sse_min = calcular_sse_matriz_exata(
+                    pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich
+                )
+
+                N_dados = len(pwf_campo)
+                p_livres = 2 if (is_fetkovich or not travar_psat) else 1
+                v_df = N_dados - p_livres
+                
+                if v_df > 0:
+                    f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
+                    sse_limiar = sse_min * (1.0 + (float(p_livres) / v_df) * f_95)
+                else:
+                    sse_limiar = sse_min 
+                    
+                mask_valid = ~np.isnan(sse_grid)
+                area_pixels = np.sum((sse_grid <= sse_limiar) & mask_valid)
+                area_pct = (area_pixels / np.sum(mask_valid)) * 100 if np.sum(mask_valid) > 0 else 0.0
+
+                col_diag1, col_diag2 = st.columns(2)
+                col_diag1.metric(f"Região de Confiança Rigorosa (F-95%)", f"{area_pct:.1f}% do Domínio")
+                col_diag2.metric("Mínimo Global OLS", f"{sse_min:.1f} (SSE)")
+
+                label_x = 'C' if is_fetkovich else 'J'
+                label_y = 'n' if is_fetkovich else 'Psat'
+
+                fig_3d = go.Figure(data=[go.Surface(z=sse_grid, x=j_grid, y=psat_grid, colorscale='Viridis')])
+                fig_3d.add_trace(go.Scatter3d(
+                    x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[sse_min],
+                    mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Mínimo Estrito'
+                ))
+                fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
+                st.plotly_chart(fig_3d, use_container_width=True)
+
+                # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR ---
+                st.markdown("---")
+                st.subheader("🌪️ Análise de Sensibilidade Global de Sobol (Fator de Forma Adimensional)")
+                
+                with st.spinner("Avaliando Ortogonalidade Estocástica via Fator de Forma Adimensional da IPR..."):
+                    pe_bounds = [pe_campo * 0.85, pe_campo * 1.15] 
+                    if is_fetkovich:
+                        p1_bounds = [max(1e-6, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
+                        p2_bounds = [0.5, 1.0] 
+                    else:
+                        p1_bounds = [max(1e-3, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
+                        p2_bounds = [100.0, pe_campo * 0.999] 
+
+                    problem = {'num_vars': 3, 'names': ['Pe', 'P1', 'P2'], 'bounds': [pe_bounds, p1_bounds, p2_bounds]}
+                    param_values = saltelli.sample(problem, 1024)
+                    
+                    pe_s = param_values[:, 0]
+                    p1_s = param_values[:, 1]
+                    p2_s = param_values[:, 2]
+
+                    pwf_frac = np.linspace(0, 1, 50) 
+                    fator_forma_samples = []
+
+                    for pe_val, p1_val, p2_val in zip(pe_s, p1_s, p2_s):
+                        pe_escalar = float(pe_val)
+                        pwf_array = pe_escalar * pwf_frac
+                        
+                        if is_fetkovich:
+                            q_array = ModelosIPR.fetkovich(pwf_array, pe_escalar, float(p1_val), float(p2_val))
+                        else:
+                            q_array = ModelosIPR.hibrido_darcy_vogel(pwf_array, pe_escalar, float(p2_val), float(p1_val))
+                        
+                        aof_local = q_array[0]
+                        if aof_local > 0:
+                            q_adimensional = q_array / aof_local
+                            try:
+                                fator_forma = np.trapezoid(q_adimensional, pwf_frac)
+                            except AttributeError:
+                                fator_forma = np.trapz(q_adimensional, pwf_frac)
+                        else:
+                            fator_forma = 0.0
+                            
+                        fator_forma_samples.append(fator_forma)
+                        
+                    q_output = np.array(fator_forma_samples)
+                    Si = sobol.analyze(problem, q_output)
+                    
+                    S1 = Si['S1']
+                    ST = Si['ST']
+                    
+                    s1_map = dict(zip(problem['names'], S1))
+                    st_map = dict(zip(problem['names'], ST))
+                    
+                    labels_tornado = [label_y, 'Pressão Estática Pe', label_x]
+                    s1_plot = [s1_map['P2'], s1_map['Pe'], s1_map['P1']]
+                    st_plot = [st_map['P2'], st_map['Pe'], st_map['P1']]
+
+                    fig_sobol = go.Figure()
+                    fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Primeira Ordem - Efeito Puro)', marker_color='#3182ce'))
+                    fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Ordem Total - Com Interações)', marker_color='#e53e3e'))
+
+                    fig_sobol.update_layout(
+                        title="Decomposição da Variância do Fator de Forma Adimensional da IPR",
+                        xaxis_title="Índice de Sobol (Fração da Deformação Física)",
+                        barmode='group', height=400
+                    )
+                    st.plotly_chart(fig_sobol, use_container_width=True)
+                    
+                    st.caption(f"**Parecer Matemático e QoI Adimensional:** A análise avaliou {len(q_output)} hiper-superfícies. O *Quantity of Interest* isolou o viés de escala parametrizando a Área do Fator Adimensional. O tensor comprova que as transições de regime recaem estritamente sobre propriedades não-lineares, dissociando as variações artificiais numéricas.")
+
+                # --- EXPORTAÇÃO BLINDADA EM LATEX ---
+                st.markdown("---")
+                st.subheader("📥 Geração de Relatório Físico-Estatístico")
+                
+                str_j = f"{res_calibracao.J_calibrado:.4f}"
+                str_p = f"{res_calibracao.Psat_calibrado:.2f}"
+                str_pe = f"{pe_campo:.2f}"
+                str_rmse = f"{getattr(res_calibracao, 'rmse', 0.0):.2f}"
+                str_aof = f"{aof_plot:.2f}"
+                
+                tex_base = f"""\\documentclass{{article}}
 \\usepackage[T1]{{fontenc}}
 \\usepackage[utf8]{{inputenc}}
 \\usepackage{{amsmath}}
@@ -389,11 +410,11 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 
 """
 
-            if ativar_termico:
-                str_aof_t = f"{(aof_termico * fator_conv):.2f}"
-                str_mult = f"{(j_termico/res_calibracao.J_calibrado):.4f}"
-                str_delta = f"{((aof_termico - aof_base) * fator_conv):+.2f}"
-                tex_termico = f"""\\subsection*{{2. Forward Preditivo Termodin\\^amico de Arrhenius}}
+                if ativar_termico:
+                    str_aof_t = f"{(aof_termico * fator_conv):.2f}"
+                    str_mult = f"{(j_termico/res_calibracao.J_calibrado):.4f}"
+                    str_delta = f"{((aof_termico - aof_base) * fator_conv):+.2f}"
+                    tex_termico = f"""\\subsection*{{2. Forward Preditivo Termodin\\^amico de Arrhenius}}
 \\begin{{itemize}}
   \\item Delta de Temperatura: {t_ref}C a {t_res}C
   \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K
@@ -404,13 +425,13 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 \\end{{itemize}}
 
 """
-            else:
-                tex_termico = f"""\\subsection*{{2. Potencial M\\'aximo OLS}}
+                else:
+                    tex_termico = f"""\\subsection*{{2. Potencial M\\'aximo OLS}}
 AOF estabilizado: {str_aof} {unidade_vazao}.
 
 """
 
-            tex_sobol = f"""\\subsection*{{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}}
+                tex_sobol = f"""\\subsection*{{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}}
 \\begin{{itemize}}
   \\item $S_1$ (Press\\~ao Est\\'atica): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}
   \\item $S_1$ (Coeficiente/\\'Indice): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}
@@ -419,16 +440,15 @@ AOF estabilizado: {str_aof} {unidade_vazao}.
 
 \\end{{document}}
 """
+                latex_content = tex_base + tex_termico + tex_sobol
 
-            latex_content = tex_base + tex_termico + tex_sobol
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    st.download_button(label="🖩 Baixar Memorial LaTeX", data=latex_content, file_name=f"memorial_{well_name}.tex")
+                with col_btn2:
+                    df_rel = pd.DataFrame({"Parâmetro": ["Poço", "RMSE", "AOF Base", "AOF Térmico", "Sobol S1(Pe)", "Sobol S1(P1)", "Sobol S1(P2)"],
+                                           "Valor": [well_name, str_rmse, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}", f"{S1[1]:.4f}", f"{S1[2]:.4f}"]})
+                    st.download_button(label="📄 Baixar Tensor Numérico CSV", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
 
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                st.download_button(label="🖩 Baixar Memorial LaTeX", data=latex_content, file_name=f"memorial_{well_name}.tex")
-            with col_btn2:
-                df_rel = pd.DataFrame({"Parâmetro": ["Poço", "RMSE", "AOF Base", "AOF Térmico", "Sobol S1(Pe)", "Sobol S1(P1)", "Sobol S1(P2)"],
-                                       "Valor": [well_name, str_rmse, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}", f"{S1[1]:.4f}", f"{S1[2]:.4f}"]})
-                st.download_button(label="📄 Baixar Tensor Numérico CSV", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
-
-        except Exception as e:
-            st.error(f"Erro Crítico Matemático: {e}")
+            except Exception as e:
+                st.error(f"Erro Crítico Matemático: {e}")
