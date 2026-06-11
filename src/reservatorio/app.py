@@ -200,11 +200,19 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 st.subheader("🔍 Diagnóstico de Incerteza Numérica e Identificabilidade")
 
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
-                    # Correção 1: O mapa reflete estritamente o problema de calibração base
+                    # O mapa reflete estritamente o problema de calibração base
                     diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich)
 
-                    # Correção 4: Cálculo da área não-enviesada (mascarando os NaNs)
-                    limiar_incerteza = diag["rmse_min"] * 1.10
+                    # --- LIMIAR ESTATÍSTICO RIGOROSO (Região de Confiança 95% via Qui-Quadrado) ---
+                    # Para p=2 parâmetros, o quantil 95% da distribuição Chi-Quadrado é ~5.991
+                    N_dados = len(pwf_campo)
+                    chi2_95 = 5.991
+                    
+                    # Conversão da tolerância estatística de SSE para RMSE
+                    fator_expansao = np.sqrt(1.0 + (chi2_95 / N_dados))
+                    limiar_incerteza = diag["rmse_min"] * fator_expansao
+                    
+                    # Máscara rigorosa de NaNs
                     mask_valid = ~np.isnan(diag['RMSE_grid'])
                     area_pixels = np.sum((diag['RMSE_grid'] <= limiar_incerteza) & mask_valid)
                     
@@ -216,11 +224,11 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     col_diag1, col_diag2 = st.columns(2)
                     with col_diag1:
                         if diag["area_incerteza_pct"] < 5.0:
-                            st.success(f"✅ **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Alta Identificabilidade)")
+                            st.success(f"✅ **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Alta Identificabilidade)")
                         elif diag["area_incerteza_pct"] < 20.0:
-                            st.warning(f"⚠️ **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Região Estendida)")
+                            st.warning(f"⚠️ **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Incerteza Moderada)")
                         else:
-                            st.error(f"🚨 **Área de Incerteza (10% tolerância):** {diag['area_incerteza_pct']:.1f}% (Vale de Degenerescência)")
+                            st.error(f"🚨 **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Baixa Identificabilidade)")
                             
                     with col_diag2:
                         if np.isnan(diag.get("condicionamento_ci", np.nan)):
@@ -228,9 +236,9 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         elif diag["condicionamento_ci"] < 10:
                             st.success(f"✅ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Problema Bem-Posto)")
                         elif diag["condicionamento_ci"] < 50:
-                            st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Túnel Alongado)")
+                            st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Túnel Alongado de Erro)")
                         else:
-                            st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Mal Condicionado)")
+                            st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Problema Mal Condicionado)")
 
                     label_x = 'Coeficiente Performance C' if is_fetkovich else 'Índice de Produtividade J'
                     label_y = 'Expoente de Turbulência n' if is_fetkovich else 'Pressão de Saturação Psat (psi)'
@@ -241,34 +249,32 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='RMSE (psi)'), height=550)
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                st.markdown("### 🌪️ Análise de Sensibilidade Estocástica (Spearman Rank)")
+                # --- TORNADO DIRIGIDO A DADOS (MONTE CARLO) ---
+                st.markdown("### 🌪️ Análise de Sensibilidade Global")
                 
-                with st.spinner("Executando Monte Carlo para cálculo de variância explicada..."):
-                    n_samples = 5000
+                with st.spinner("Executando Monte Carlo (10.000 amostras) para correlação não-linear..."):
+                    n_samples = 10000
                     pe_samples = np.random.normal(pe_campo, pe_campo * 0.05, n_samples)
                     
                     if is_fetkovich:
                         p1_samples = np.random.lognormal(mean=np.log(max(1e-5, res_calibracao.J_calibrado)), sigma=0.1, size=n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(0.05, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        # Correção 3: Restrição física para Fetkovich (expoente n)
                         p2_samples = np.clip(p2_samples, 0.5, 1.0)
                         
-                        # Correção 2: Desacoplamento mitigado, unificando a física
                         aof_samples = ModelosIPR.fetkovich(np.zeros_like(pe_samples), pe_samples, p1_samples, p2_samples)
                     else:
                         p1_samples = np.random.normal(res_calibracao.J_calibrado, res_calibracao.J_calibrado * 0.1, n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(50.0, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        # Correção 3: Restrição física para Darcy-Vogel (Psat menor que Pe)
                         p2_samples = np.clip(p2_samples, 100.0, pe_samples * 0.999)
                         
-                        # Correção 2: Desacoplamento mitigado, unificando a física
                         aof_samples = ModelosIPR.hibrido_darcy_vogel(np.zeros_like(pe_samples), pe_samples, p2_samples, p1_samples)
                         
                     df_amostras = pd.DataFrame({'Pe': pe_samples, 'P1': p1_samples, 'P2': p2_samples, 'AOF': aof_samples})
                     
+                    # Rank de Spearman substitui "Variância Explicada" conceitualmente
                     correlacoes = df_amostras[['P2', 'Pe', 'P1']].corrwith(df_amostras['AOF'], method='spearman')
-                    variancia_explicada = correlacoes**2
-                    impacto_percentual = (variancia_explicada / variancia_explicada.sum()) * 100
+                    importancia_relativa = correlacoes**2
+                    impacto_percentual = (importancia_relativa / importancia_relativa.sum()) * 100
 
                     labels_tornado = [label_y, 'Pressão Estática Pe', label_x]
                     valores_tornado = [impacto_percentual['P2'], impacto_percentual['Pe'], impacto_percentual['P1']]
@@ -279,12 +285,13 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         text=[f"{v:.1f}%" for v in valores_tornado], textposition='auto'
                     ))
                     fig_tornado.update_layout(
-                        title="Impacto Estocástico na AOF (Variância Explicada - 5.000 iterações)",
-                        xaxis_title="Sensibilidade Relativa (% de Impacto na Variância)",
-                        yaxis_title="Variável de Projeto", height=300, margin=dict(l=10, r=10, b=30, t=40)
+                        title="Importância Relativa dos Parâmetros (Spearman Rank - 10.000 iterações)",
+                        xaxis_title="Influência Paramétrica Relativa (%)",
+                        yaxis_title="Variável Aleatória", height=300, margin=dict(l=10, r=10, b=30, t=40)
                     )
                     st.plotly_chart(fig_tornado, use_container_width=True)
 
+                # --- EXPORTAÇÃO BLINDADA ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
