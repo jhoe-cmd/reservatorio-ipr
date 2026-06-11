@@ -204,15 +204,12 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich)
 
                     # --- LIMIAR ESTATÍSTICO RIGOROSO (Região de Confiança 95% via Qui-Quadrado) ---
-                    # Para p=2 parâmetros, o quantil 95% da distribuição Chi-Quadrado é ~5.991
                     N_dados = len(pwf_campo)
                     chi2_95 = 5.991
                     
-                    # Conversão da tolerância estatística de SSE para RMSE
                     fator_expansao = np.sqrt(1.0 + (chi2_95 / N_dados))
                     limiar_incerteza = diag["rmse_min"] * fator_expansao
                     
-                    # Máscara rigorosa de NaNs
                     mask_valid = ~np.isnan(diag['RMSE_grid'])
                     area_pixels = np.sum((diag['RMSE_grid'] <= limiar_incerteza) & mask_valid)
                     
@@ -261,13 +258,17 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(0.05, res_calibracao.Psat_calibrado * 0.05), n_samples)
                         p2_samples = np.clip(p2_samples, 0.5, 1.0)
                         
-                        aof_samples = ModelosIPR.fetkovich(np.zeros_like(pe_samples), pe_samples, p1_samples, p2_samples)
+                        # --- CORREÇÃO: np.vectorize() BLINDA CONTRA ARRAYS MULTIDIMENSIONAIS NO IF DO DOMÍNIO ---
+                        v_fetkovich = np.vectorize(ModelosIPR.fetkovich)
+                        aof_samples = v_fetkovich(0.0, pe_samples, p1_samples, p2_samples)
                     else:
                         p1_samples = np.random.normal(res_calibracao.J_calibrado, res_calibracao.J_calibrado * 0.1, n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(50.0, res_calibracao.Psat_calibrado * 0.05), n_samples)
                         p2_samples = np.clip(p2_samples, 100.0, pe_samples * 0.999)
                         
-                        aof_samples = ModelosIPR.hibrido_darcy_vogel(np.zeros_like(pe_samples), pe_samples, p2_samples, p1_samples)
+                        # --- CORREÇÃO: np.vectorize() BLINDA CONTRA ARRAYS MULTIDIMENSIONAIS NO IF DO DOMÍNIO ---
+                        v_hibrido = np.vectorize(ModelosIPR.hibrido_darcy_vogel)
+                        aof_samples = v_hibrido(0.0, pe_samples, p2_samples, p1_samples)
                         
                     df_amostras = pd.DataFrame({'Pe': pe_samples, 'P1': p1_samples, 'P2': p2_samples, 'AOF': aof_samples})
                     
