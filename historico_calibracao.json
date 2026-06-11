@@ -117,5 +117,22 @@
         "cost": 2.329802448319648e-16,
         "message": "`xtol` termination condition is satisfied.",
         "version": "3.1.0"
+    },
+    {
+        "well_name": "Caso 1: Pré-Sal (Monofásico - Não Identificável)",
+        "date": "2026-06-11T10:11:09.233047",
+        "model": "Fetkovich (Gás / Alta Turbulência)",
+        "J_calibrado": 4467.539198315108,
+        "Psat_calibrado": 0.9999999999999999,
+        "rmse": 60.12815133851466,
+        "mae": 56.874433001502666,
+        "mape": 0.05073214969367685,
+        "r2": 0.9919657898146949,
+        "bias": 20.020733154548452,
+        "success": true,
+        "nfev": 19,
+        "cost": 7230.789166774644,
+        "message": "`ftol` termination condition is satisfied.",
+        "version": "3.1.0"
     }
 ]
