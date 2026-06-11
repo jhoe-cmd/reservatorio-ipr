@@ -30,7 +30,6 @@ class ModelosIPR:
         pwf_safe = np.clip(pwf, 0.0, pe)
         
         mask_darcy = pwf_safe >= psat
-        # Broadcasting natural do NumPy (suporta tensores 4x100x100)
         q = np.where(mask_darcy, j * (pe - pwf_safe), q)
         
         mask_vogel = pwf_safe < psat
@@ -96,7 +95,6 @@ class HistoryMatchingService:
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
     """
     Geração Hiper-Rápida do Tensor de Erros O(1) usando Broadcasting do NumPy.
-    Fim absoluto dos loops em Python. Malha superdensa sem viés de discretização.
     """
     res_malha = 100j # 10.000 pontos nodais avaliados simultaneamente
     
@@ -105,7 +103,6 @@ def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fe
     else:
         j_grid, psat_grid = np.mgrid[max(1e-3, j_opt*0.2):j_opt*2.0:res_malha, 100.0:(pe*0.999):res_malha]
         
-    # Elevação de dimensão para broadcasting (Nx1x1) vs (100x100) -> Tensor (Nx100x100)
     pwf_brd = pwf_medidos[:, np.newaxis, np.newaxis]
     q_medidos_brd = q_medidos[:, np.newaxis, np.newaxis]
     
@@ -114,7 +111,6 @@ def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fe
     else:
         q_calc_tensor = ModelosIPR.hibrido_darcy_vogel(pwf_brd, pe, psat_grid, j_grid)
         
-    # Integração vetorial ao longo da dimensão N dos pontos de poço
     sse_grid = np.sum((q_calc_tensor - q_medidos_brd)**2, axis=0)
             
     if is_fetkovich:
@@ -185,7 +181,7 @@ st.sidebar.header("🌡️ Termodinâmica Preditiva")
 ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Forward", value=True)
 t_ref = st.sidebar.number_input("T Ref PVT (°C)", value=25.0)
 t_res = st.sidebar.number_input("T Reservatório (°C)", value=60.0)
-ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0, help="Representa o decaimento não-linear da viscosidade.")
+ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0)
 
 if st.sidebar.button("🗑️ Limpar Gráficos"):
     st.session_state["ghost_curves"] = []
@@ -236,6 +232,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 aof_termico = aof_base 
 
             q_arr_plot = q_arr_base * fator_conv
+            aof_plot = aof_base * fator_conv # Correção da Variável Ausente
             q_arr_plot_t = q_arr_termico * fator_conv if ativar_termico else q_arr_plot
             
             st.session_state["ghost_curves"].append({"name": f"{well_name}", "q": q_arr_plot, "pwf": pwf_arr})
@@ -244,7 +241,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             for ghost in st.session_state["ghost_curves"][:-1]:
                 ax.plot(ghost["q"], ghost["pwf"], color='gray', alpha=0.3, linestyle='--')
             
-            ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base OLS (AOF: {aof_base*fator_conv:.0f})')
+            ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base OLS (AOF: {aof_plot:.0f})')
             if ativar_termico:
                 ax.plot(q_arr_plot_t, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', label=f'IPR Predição Térmica (AOF: {aof_termico*fator_conv:.0f})')
             ax.scatter(q_campo * fator_conv, pwf_campo, color='black', zorder=5, label='Dados Experimentais')
@@ -252,7 +249,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             ax.set_xlabel(f"Vazão de Produção ({unidade_vazao})")
             ax.set_ylabel("Pwf Dinâmica (psi)")
             ax.set_ylim(0, pe_campo + 500)
-            limite_x = max(aof_termico * fator_conv, aof_base * fator_conv) * 1.1
+            limite_x = max(aof_termico * fator_conv, aof_plot) * 1.1
             ax.set_xlim(0, limite_x)
             ax.grid(True, linestyle=':')
             ax.legend()
@@ -270,7 +267,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             p_livres = 2 if (is_fetkovich or not travar_psat) else 1
             v_df = N_dados - p_livres
             
-            # Teorema OLS Extrito de Likelihood (Snedecor F-Test)
             if v_df > 0:
                 f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
                 sse_limiar = sse_min * (1.0 + (float(p_livres) / v_df) * f_95)
@@ -296,7 +292,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
             st.plotly_chart(fig_3d, use_container_width=True)
 
-            # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR (O SALTO ACADÊMICO) ---
+            # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR ---
             st.markdown("---")
             st.subheader("🌪️ Análise de Sensibilidade Global de Sobol (Fator de Forma Adimensional)")
             
@@ -316,11 +312,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 p1_s = param_values[:, 1]
                 p2_s = param_values[:, 2]
 
-                # Domínio Dinâmico de Pressão Adimensional P_frac = Pwf / Pe (0 a 1)
                 pwf_frac = np.linspace(0, 1, 50) 
                 fator_forma_samples = []
 
-                # O QoI Invariante de Escala que Mede a Deformação Física e as Transições de Regime
                 for pe_val, p1_val, p2_val in zip(pe_s, p1_s, p2_s):
                     pe_escalar = float(pe_val)
                     pwf_array = pe_escalar * pwf_frac
@@ -331,7 +325,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         q_array = ModelosIPR.hibrido_darcy_vogel(pwf_array, pe_escalar, float(p2_val), float(p1_val))
                     
                     aof_local = q_array[0]
-                    # Construção da Variável de Interesse Físico-Adimensional (Curvatura da IPR)
                     if aof_local > 0:
                         q_adimensional = q_array / aof_local
                         try:
@@ -367,9 +360,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 )
                 st.plotly_chart(fig_sobol, use_container_width=True)
                 
-                st.caption(f"**Parecer Matemático e QoI Adimensional:** A análise de Saltelli avaliou {len(q_output)} hiper-superfícies. Para isolar o viés de escala e as correlações estocásticas embutidas, o *Quantity of Interest* computado foi a **Área do Fator de Forma Adimensional** $\left(\\int_0^1 \\frac{{q}}{{AOF}} \\ d\\left(\\frac{{P_{{wf}}}}{{P_e}}\\right)\\right)$. Este tensor comprova explicitamente que a variação isolada (S1) das transições de regime de escoamento recai estritamente sobre a pressão de bolha e propriedades não-lineares, dissociando as variações artificiais numéricas do sistema.")
+                st.caption(f"**Parecer Matemático:** Avaliadas {len(q_output)} hiper-superfícies de Saltelli. A Variável de Interesse Físico (QoI) isolou o viés de escala parametrizando a Área do Fator Adimensional. O tensor comprova que as transições de regime recaem estritamente sobre propriedades não-lineares, dissociando as variações artificiais numéricas do sistema.")
 
-            # --- EXPORTAÇÃO BLINDADA ---
+            # --- EXPORTAÇÃO BLINDADA EM LATEX MULTILINE ---
             st.markdown("---")
             st.subheader("📥 Geração de Relatório Físico-Estatístico")
             
@@ -379,37 +372,55 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
             str_rmse = f"{getattr(res_calibracao, 'rmse', 0.0):.2f}"
             str_aof = f"{aof_plot:.2f}"
             
-            tex_base = (
-                "\\documentclass{article}\n\\usepackage[T1]{fontenc}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath}\n\\begin{document}\n\n"
-                f"\\section*{{Memorial F\\'isico-Estat\\'istico - Po\\c{{c}}o: {well_name}}}\n\n"
-                "\\subsection*{1. Formula\\c{{c}}\\~ao do Problema Inverso Isom\\'etrico OLS}\n\\begin{itemize}\n"
-                f"  \\item RMSE Residual do Truncamento: {str_rmse} psi\n"
-                f"  \\item Parametro 1 (J/C) Convergido: {str_j}\n"
-                f"  \\item Parametro 2 (Psat/n) Convergido: {str_p}\n\\end{itemize}\n\n"
-            )
+            tex_base = f"""\\documentclass{{article}}
+\\usepackage[T1]{{fontenc}}
+\\usepackage[utf8]{{inputenc}}
+\\usepackage{{amsmath}}
+\\begin{{document}}
+
+\\section*{{Memorial F\\'isico-Estat\\'istico - Po\\c{{c}}o: {well_name}}}
+
+\\subsection*{{1. Formula\\c{{c}}\\~ao do Problema Inverso Isom\\'etrico OLS}}
+\\begin{{itemize}}
+  \\item RMSE Residual do Truncamento: {str_rmse} psi
+  \\item Parametro 1 (J/C) Convergido: {str_j}
+  \\item Parametro 2 (Psat/n) Convergido: {str_p}
+\\end{{itemize}}
+
+"""
 
             if ativar_termico:
                 str_aof_t = f"{(aof_termico * fator_conv):.2f}"
                 str_mult = f"{(j_termico/res_calibracao.J_calibrado):.4f}"
-                tex_termico = (
-                    "\\subsection*{2. Forward Preditivo Termodin\\^amico de Arrhenius}\n\\begin{itemize}\n"
-                    f"  \\item Delta de Temperatura: {t_ref}C a {t_res}C\n"
-                    f"  \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K\n"
-                    f"  \\item Tensor Exponencial de Fluxo: {str_mult}\n"
-                    f"  \\item Delta AOF Absoluto: {str_aof_t} {unidade_vazao}\n\\end{itemize}\n\n"
-                )
+                str_delta = f"{((aof_termico - aof_base) * fator_conv):+.2f}"
+                tex_termico = f"""\\subsection*{{2. Forward Preditivo Termodin\\^amico de Arrhenius}}
+\\begin{{itemize}}
+  \\item Delta de Temperatura: {t_ref}C a {t_res}C
+  \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K
+  \\item Tensor Exponencial de Fluxo: {str_mult}
+  \\item AOF Base: {str_aof} {unidade_vazao}
+  \\item AOF T\\'ermico: {str_aof_t} {unidade_vazao}
+  \\item Delta AOF Absoluto: {str_delta} {unidade_vazao}
+\\end{{itemize}}
+
+"""
             else:
-                tex_termico = f"\\subsection*{{2. Potencial M\\'aximo OLS}}\nAOF estabilizado: {str_aof} {unidade_vazao}.\n\n"
+                tex_termico = f"""\\subsection*{{2. Potencial M\\'aximo OLS}}
+AOF estabilizado: {str_aof} {unidade_vazao}.
 
-            tex_sobol = (
-                "\\subsection*{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}\n"
-                "\\begin{itemize}\n"
-                f"  \\item $S_1$ (Press\\~ao Est\\'atica): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}\n"
-                f"  \\item $S_1$ (Coeficiente/\\'Indice): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}\n"
-                f"  \\item $S_1$ (Expoente/Psat): {S1[2]:.4f} | $S_T$: {ST[2]:.4f}\n\\end{itemize}\n\n"
-            )
+"""
 
-            latex_content = tex_base + tex_termico + tex_sobol + "\\end{document}\n"
+            tex_sobol = f"""\\subsection*{{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}}
+\\begin{{itemize}}
+  \\item $S_1$ (Press\\~ao Est\\'atica): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}
+  \\item $S_1$ (Coeficiente/\\'Indice): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}
+  \\item $S_1$ (Expoente/Psat): {S1[2]:.4f} | $S_T$: {ST[2]:.4f}
+\\end{{itemize}}
+
+\\end{{document}}
+"""
+
+            latex_content = tex_base + tex_termico + tex_sobol
 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
