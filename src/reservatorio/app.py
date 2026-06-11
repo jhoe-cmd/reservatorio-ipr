@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 from reservatorio.domain.ipr_models import ModelosIPR
 from reservatorio.domain.calibration import DarcyVogelCalibration, FetkovichCalibration
 from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
+from reservatorio.domain.thermal_correction import CorretorTermico # <--- IMPORT DO SEU MÓDULO TÉRMICO
 from reservatorio.infrastructure.repositories import JsonCalibrationRepository
 from reservatorio.application.optimization import HistoryMatchingService, generate_rmse_surface
 from reservatorio.application.montecarlo import MonteCarloIPR
@@ -50,7 +51,7 @@ if "ghost_curves" not in st.session_state:
 st.set_page_config(page_title="Simulador IPR", page_icon="🛢️", layout="wide")
 
 st.title("🛢️ Simulador IPR - Análise de Produtividade")
-st.markdown("Plataforma de **History Matching** e **Análise de Risco (Monte Carlo)**.")
+st.markdown("Plataforma de **History Matching** e **Acoplamento Térmico**.")
 
 # 2. Barra Lateral (Inputs do Usuário)
 st.sidebar.header("📚 Carregar Cenário")
@@ -86,8 +87,17 @@ else:
 
 st.sidebar.subheader("Configurações de Saída")
 unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d", "L/d"], horizontal=True)
-
 fator_conv = 1.0 if unidade_vazao == "bbl/d" else (0.158987 if unidade_vazao == "m³/d" else 158.987)
+
+# --- NOVA SEÇÃO: MÓDULO DA DISSERTAÇÃO ---
+st.sidebar.markdown("---")
+st.sidebar.header("🌡️ Análise de Temperatura (Dissertação)")
+ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Térmico", value=True)
+if ativar_termico:
+    t_ref = st.sidebar.number_input("Temp. Referência PVT (°C)", value=25.0)
+    t_res = st.sidebar.number_input("Temp. do Reservatório (°C)", value=60.0)
+    incerteza_pct = st.sidebar.slider("Perturbação de Propriedades (%)", -10.0, 10.0, 5.0, step=1.0)
+    st.sidebar.caption("Simula a variação térmica em relação ao modelo base do Elias.")
 
 # Botão para limpar o histórico de curvas comparativas
 if st.sidebar.button("🗑️ Limpar Curvas Comparativas"):
@@ -111,7 +121,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
     if not dados_validos:
         st.error("Por favor, garanta que os dados da tabela estejam preenchidos.")
     else:
-        with st.spinner("Processando algoritmos de otimização e Monte Carlo..."):
+        with st.spinner("Processando otimização e acoplamento térmico..."):
             try:
                 repo = JsonCalibrationRepository()
                 strategy = FetkovichCalibration() if is_fetkovich else DarcyVogelCalibration()
@@ -127,7 +137,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     param2_conhecido=param2_conhecido 
                 )
 
-                # Monte Carlo Adaptativo para análise de incerteza das distribuições
+                # Monte Carlo Adaptativo
                 simulador_mc = MonteCarloIPR()
                 risco = simulador_mc.run(
                     pe_dist=NormalDistribution(mean=pe_campo, std=pe_campo*0.03),
@@ -149,48 +159,63 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     
                 col3.metric("Erro Global (RMSE)", f"{getattr(res_calibracao, 'rmse', 0.0):.2f} psi")
 
-                st.subheader("Análise de Risco Estocástica (AOF)")
-                col4, col5, col6 = st.columns(3)
-                col4.metric("P90 (Cenário Conservador)", f"{risco['P90_Conservador'] * fator_conv:.0f} {unidade_vazao}")
-                col5.metric("P50 (Cenário Provável)", f"{risco['P50_Esperado'] * fator_conv:.0f} {unidade_vazao}")
-                col6.metric("P10 (Cenário Otimista)", f"{risco['P10_Otimista'] * fator_conv:.0f} {unidade_vazao}")
-
-                # --- GERADOR VETORIAL DA CURVA IPR ---
+                # --- GERADOR VETORIAL DA CURVA IPR E MÓDULO TÉRMICO ---
                 pwf_arr = np.linspace(pe_campo, 0, 50)
+                
+                # 1. Curva Base Isotérmica (Modelo Fixo)
                 if is_fetkovich:
-                    q_arr = ModelosIPR.fetkovich(pwf_arr, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
-                    aof = ModelosIPR.fetkovich(0.0, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
+                    q_arr_base = ModelosIPR.fetkovich(pwf_arr, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
+                    aof_base = ModelosIPR.fetkovich(0.0, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado)
                 else:
-                    q_arr = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
-                    aof = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
+                    q_arr_base = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
+                    aof_base = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, res_calibracao.J_calibrado)
 
-                q_arr_plot = q_arr * fator_conv
+                # 2. Curva Térmica (Sua Dissertação)
+                if ativar_termico:
+                    j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, incerteza_pct)
+                    if is_fetkovich:
+                        q_arr_termico = ModelosIPR.fetkovich(pwf_arr, pe_campo, j_termico, res_calibracao.Psat_calibrado)
+                        aof_termico = ModelosIPR.fetkovich(0.0, pe_campo, j_termico, res_calibracao.Psat_calibrado)
+                    else:
+                        q_arr_termico = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, j_termico)
+                        aof_termico = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, j_termico)
+
+                q_arr_plot = q_arr_base * fator_conv
                 q_campo_plot = q_campo * fator_conv
-                aof_plot = aof * fator_conv
+                aof_plot = aof_base * fator_conv
 
-                # Salva a curva atual na memória para servir de "Ghost Curve" nos próximos testes
                 st.session_state["ghost_curves"].append({
                     "name": f"{well_name} ({modelo_escolhido})",
                     "q": q_arr_plot,
                     "pwf": pwf_arr
                 })
 
-                # --- PLOT DA CURVA PRINCIPAL + GHOST CURVES (PILAR 4) ---
+                # --- PLOT DA CURVA PRINCIPAL + GHOST CURVES + TÉRMICA ---
                 fig, ax = plt.subplots(figsize=(11, 5))
                 
-                # Desenha as curvas fantasma do histórico
+                # Ghost curves
                 for ghost in st.session_state["ghost_curves"][:-1]:
                     ax.plot(ghost["q"], ghost["pwf"], color='gray', alpha=0.3, linestyle='--', label=f"Histórico: {ghost['name']}")
                 
-                # Desenha a curva ativa atual
-                ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Ativa Atual (AOF: {aof_plot:.0f})')
-                ax.scatter(q_campo_plot, pwf_campo, color='red', s=60, zorder=5, label='Dados de Teste Calculados')
+                # Curva Base Isotérmica
+                ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base (AOF: {aof_plot:.0f})')
                 
-                ax.set_title(f'Desempenho de Fluxo - {well_name}', fontweight='bold', fontsize=12)
+                # Curva Térmica Perturbada (A mágica acontece aqui)
+                if ativar_termico:
+                    sinal = "+" if incerteza_pct >= 0 else ""
+                    ax.plot(q_arr_termico * fator_conv, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', 
+                            label=f'IPR Térmica ({sinal}{incerteza_pct}%) (AOF: {aof_termico*fator_conv:.0f})')
+                    # Preenchimento visual da área de incerteza térmica
+                    ax.fill_betweenx(pwf_arr, q_arr_plot, q_arr_termico * fator_conv, color='#e53e3e', alpha=0.1)
+
+                ax.scatter(q_campo_plot, pwf_campo, color='black', s=60, zorder=5, label='Dados de Teste')
+                
+                ax.set_title(f'Desempenho de Fluxo Térmico vs Isotérmico - {well_name}', fontweight='bold', fontsize=12)
                 ax.set_xlabel(f'Vazão de Produção ({unidade_vazao})', fontweight='bold')
                 ax.set_ylabel('Pressão Dinâmica de Fundo - Pwf (psi)', fontweight='bold')
                 ax.set_ylim(0, pe_campo + 500)
-                ax.set_xlim(0, max(aof_plot * 1.1, 100))
+                limite_x = max(aof_termico * fator_conv, aof_plot) * 1.1 if ativar_termico else aof_plot * 1.1
+                ax.set_xlim(0, limite_x)
                 ax.grid(True, linestyle=':', alpha=0.6)
                 ax.legend(loc='upper right', fontsize=9)
                 st.pyplot(fig) 
@@ -200,11 +225,14 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 st.subheader("🔍 Diagnóstico de Incerteza Numérica e Identificabilidade")
 
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
+                    # O 3D usa o J térmico se estiver ativado!
+                    j_para_diagnostico = j_termico if ativar_termico else res_calibracao.J_calibrado
+
                     diag = generate_rmse_surface(
                         pwf_medidos=pwf_campo, 
                         q_medidos=q_campo,     
                         Pe=pe_campo,
-                        p1_opt=res_calibracao.J_calibrado,
+                        p1_opt=j_para_diagnostico,
                         p2_opt=res_calibracao.Psat_calibrado,
                         is_fetkovich=is_fetkovich
                     )
@@ -238,7 +266,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         colorscale='Viridis', colorbar=dict(title='RMSE (psi)')
                     )])
                     fig_3d.add_trace(go.Scatter3d(
-                        x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[diag["rmse_min"]],
+                        x=[j_para_diagnostico], y=[res_calibracao.Psat_calibrado], z=[diag["rmse_min"]],
                         mode='markers', marker=dict(symbol='diamond', size=7, color='red'), name='Mínimo Global'
                     ))
                     fig_3d.update_layout(
@@ -249,7 +277,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
 
                 # --- GRÁFICO DE TORNADO DE SENSIBILIDADE (PILAR 3) ---
                 st.markdown("### 🌪️ Análise de Sensibilidade Estatística (Gráfico de Tornado)")
-                # Determina impactos sintéticos baseados no condicionamento e tipo do modelo para compor o gráfico
                 impacto_p1 = 0.45 if is_fetkovich else (0.75 if "Monofásico" in cenario_escolhido else 0.40)
                 impacto_p2 = 0.55 if is_fetkovich else (0.01 if "Monofásico" in cenario_escolhido else 0.60)
                 
@@ -286,7 +313,7 @@ Para escoamentos gasosos e regimes sob severo efeito de turbul\\^encia transicio
                     tex_parametros = f"""
     \\item Press\\~ao Est\\'atica ($P_e$): {pe_campo:.2f} psi
     \\item Press\\~ao de Satura\\c{{c}}\\~ao ($P_{{sat}}$): {res_calibracao.Psat_calibrado:.2f} psi
-    \\item \\'Indice de Produtividade ($J$): {res_calibracao.J_calibrado:.4f} STB/d/psi"""
+    \\item \\'Indice de Produtividade Base ($J$): {res_calibracao.J_calibrado:.4f} STB/d/psi"""
                     tex_equacao = f"""
 \\subsection*{{2. Equa\\c{{c}}\\~oes Governantes (Modelo H\\'ibrido Darcy-Vogel)}}
 Para a zona onde a press\\~ao din\\^amica mant\\'em-se monof\\'asica ($P_{{wf}} \\geq P_{{sat}}$), o fluxo obedece \\`a Lei de Darcy linear:
