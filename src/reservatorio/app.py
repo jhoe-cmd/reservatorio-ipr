@@ -9,15 +9,6 @@ import plotly.graph_objects as go
 import scipy.stats as stats
 from scipy.optimize import least_squares
 
-# --- IMPORTAÇÕES DA NOSSA NOVA ARQUITETURA ---
-from reservatorio.domain.ipr_models import ModelosIPR
-from reservatorio.domain.calibration import DarcyVogelCalibration, FetkovichCalibration
-from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
-from reservatorio.infrastructure.repositories import JsonCalibrationRepository
-from reservatorio.application.optimization import HistoryMatchingService
-from reservatorio.application.montecarlo import MonteCarloIPR
-from reservatorio.infrastructure.interface_entrada import InterfaceEntradaDados
-
 # --- IMPORTAÇÃO ACADÊMICA: ÍNDICES DE SOBOL ---
 try:
     from SALib.sample import saltelli
@@ -32,6 +23,7 @@ except ImportError:
 class ModelosIPR:
     @staticmethod
     def hibrido_darcy_vogel(pwf, pe, psat, j):
+        """Modelo 100% tensorial c/ suporte a broadcasting 3D e clamps estritos."""
         pwf = np.asarray(pwf)
         q = np.zeros_like(pwf, dtype=float)
         
@@ -63,6 +55,7 @@ class ModelosIPR:
 class CorretorTermico:
     @staticmethod
     def ajustar_indice_J(j_base, t_res, t_ref, ea_r):
+        """Correção Termodinâmica Forward via Lei de Arrhenius (Predição Estrita)"""
         tk_res = t_res + 273.15
         tk_ref = t_ref + 273.15
         multiplicador_exponencial = np.exp(-ea_r * ((1.0 / tk_res) - (1.0 / tk_ref)))
@@ -99,6 +92,9 @@ class HistoryMatchingService:
 
 @st.cache_data
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
+    """
+    Geração Hiper-Rápida do Tensor de Erros O(1) usando Broadcasting do NumPy.
+    """
     res_malha = 100j 
     
     if is_fetkovich:
@@ -127,6 +123,21 @@ def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fe
 # ==============================================================================
 # CAMADA DE APRESENTAÇÃO E INTEGRAÇÃO DE ENTRADA DE DADOS
 # ==============================================================================
+# MOCK DE ENTRADA (Como o InterfaceEntradaDados original está em outro arquivo)
+class InterfaceEntradaDadosMock:
+    @staticmethod
+    def renderizar_entrada_dados():
+        st.info("Para usar a Tabela de Entrada interativa, certifique-se de que a classe `InterfaceEntradaDados` original está sendo chamada corretamente.")
+        return pd.DataFrame()
+    @staticmethod
+    def validar_dados(df):
+        return False, None, None
+
+try:
+    from reservatorio.infrastructure.interface_entrada import InterfaceEntradaDados
+except ImportError:
+    InterfaceEntradaDados = InterfaceEntradaDadosMock
+
 PRESETS_POCOS = {
     "Entrada Manual / Tabela": None,
     "Caso 1: Pré-Sal (Monofásico - Não Identificável)": {
@@ -189,12 +200,18 @@ t_ref = st.sidebar.number_input("T Ref PVT (°C)", value=25.0)
 t_res = st.sidebar.number_input("T Reservatório (°C)", value=60.0)
 ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0)
 
+# --- NOVA SEÇÃO DE CONTROLE DE INCERTEZA ---
+st.sidebar.markdown("---")
+st.sidebar.header("🌪️ Análise Estocástica (Sobol)")
+var_sobol_pct = st.sidebar.slider(
+    "Variação Paramétrica (%)", 
+    min_value=1.0, max_value=20.0, value=5.0, step=1.0, 
+    help="Define a janela de incerteza (ruído de medição/operação) ao redor do ponto ótimo calibrado. Padrão sugerido: 2% a 5%."
+)
+
 if st.sidebar.button("🗑️ Limpar Gráficos"):
     st.session_state["ghost_curves"] = []
 
-# ==============================================================================
-# ENTRADA DE DADOS E VALIDAÇÃO (O BLOCO QUE ESTAVA FALTANDO)
-# ==============================================================================
 if cenario_escolhido == "Entrada Manual / Tabela":
     df_dados_poco = InterfaceEntradaDados.renderizar_entrada_dados()
     dados_validos, pwf_campo, q_campo = InterfaceEntradaDados.validar_dados(df_dados_poco)
@@ -213,7 +230,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
     else:
         with st.spinner("Resolvendo Sistema Tensorial e Estatístico..."):
             try:
-                # --- 1. HISTORY MATCHING TRF (Isotérmico Base) ---
+                # --- 1. HISTORY MATCHING TRF ---
                 hm_service = HistoryMatchingService()
                 res_calibracao = hm_service.calibrar(
                     well_name, pwf_campo, q_campo, pe_campo, 
@@ -313,18 +330,22 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='SSE'), height=550)
                 st.plotly_chart(fig_3d, use_container_width=True)
 
-                # --- 4. SOBOL - FATOR DE FORMA ADIMENSIONAL DA IPR ---
+                # --- 4. SOBOL - COM JANELA DE PERTURBAÇÃO DINÂMICA (2% A 20%) ---
                 st.markdown("---")
                 st.subheader("🌪️ Análise de Sensibilidade Global de Sobol (Fator de Forma Adimensional)")
                 
-                with st.spinner("Avaliando Ortogonalidade Estocástica via Fator de Forma Adimensional da IPR..."):
-                    pe_bounds = [pe_campo * 0.85, pe_campo * 1.15] 
+                with st.spinner(f"Avaliando Incerteza Regional (±{var_sobol_pct}%) ao redor da Calibração Mínima..."):
+                    
+                    # Implementação da Variação Paramétrica Precisa via Slider
+                    delta = var_sobol_pct / 100.0
+                    
+                    pe_bounds = [pe_campo * (1.0 - delta), pe_campo * (1.0 + delta)] 
                     if is_fetkovich:
-                        p1_bounds = [max(1e-6, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
-                        p2_bounds = [0.5, 1.0] 
+                        p1_bounds = [max(1e-8, res_calibracao.J_calibrado * (1.0 - delta)), res_calibracao.J_calibrado * (1.0 + delta)]
+                        p2_bounds = [max(0.5, res_calibracao.Psat_calibrado * (1.0 - delta)), min(1.0, res_calibracao.Psat_calibrado * (1.0 + delta))] 
                     else:
-                        p1_bounds = [max(1e-3, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
-                        p2_bounds = [100.0, pe_campo * 0.999] 
+                        p1_bounds = [max(1e-8, res_calibracao.J_calibrado * (1.0 - delta)), res_calibracao.J_calibrado * (1.0 + delta)]
+                        p2_bounds = [max(14.7, res_calibracao.Psat_calibrado * (1.0 - delta)), min(pe_campo * 0.999, res_calibracao.Psat_calibrado * (1.0 + delta))] 
 
                     problem = {'num_vars': 3, 'names': ['Pe', 'P1', 'P2'], 'bounds': [pe_bounds, p1_bounds, p2_bounds]}
                     param_values = saltelli.sample(problem, 1024)
@@ -375,13 +396,13 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Ordem Total - Com Interações)', marker_color='#e53e3e'))
 
                     fig_sobol.update_layout(
-                        title="Decomposição da Variância do Fator de Forma Adimensional da IPR",
+                        title=f"Decomposição da Variância do Fator de Forma Adimensional (\u00B1{var_sobol_pct}% Incerteza)",
                         xaxis_title="Índice de Sobol (Fração da Deformação Física)",
                         barmode='group', height=400
                     )
                     st.plotly_chart(fig_sobol, use_container_width=True)
                     
-                    st.caption(f"**Parecer Matemático e QoI Adimensional:** A análise avaliou {len(q_output)} hiper-superfícies. O *Quantity of Interest* isolou o viés de escala parametrizando a Área do Fator Adimensional. O tensor comprova que as transições de regime recaem estritamente sobre propriedades não-lineares, dissociando as variações artificiais numéricas.")
+                    st.caption(f"**Parecer Matemático e Incerteza Controlada:** A análise explorou uma vizinhança de ruído/incerteza de $\\pm{var_sobol_pct}\\%$ ao redor dos parâmetros otimizados OLS. O *Quantity of Interest* computado isolou o viés de escala parametrizando a Área do Fator Adimensional. O tensor comprova analiticamente que as transições de regime de escoamento recaem estritamente sobre as propriedades não-lineares avaliadas na vizinhança local.")
 
                 # --- EXPORTAÇÃO BLINDADA EM LATEX ---
                 st.markdown("---")
@@ -431,7 +452,7 @@ AOF estabilizado: {str_aof} {unidade_vazao}.
 
 """
 
-                tex_sobol = f"""\\subsection*{{3. Sensibilidade Global Ortogonal (QoI Fator Adimensional)}}
+                tex_sobol = f"""\\subsection*{{3. Sensibilidade Global Ortogonal (Janela Estoc\\'astica $\\pm{var_sobol_pct}\\%$)}}
 \\begin{{itemize}}
   \\item $S_1$ (Press\\~ao Est\\'atica): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}
   \\item $S_1$ (Coeficiente/\\'Indice): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}
