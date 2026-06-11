@@ -200,10 +200,8 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 st.subheader("🔍 Diagnóstico de Incerteza Numérica e Identificabilidade")
 
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
-                    # O mapa reflete estritamente o problema de calibração base
                     diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich)
 
-                    # --- LIMIAR ESTATÍSTICO RIGOROSO (Região de Confiança 95% via Qui-Quadrado) ---
                     N_dados = len(pwf_campo)
                     chi2_95 = 5.991
                     
@@ -246,7 +244,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='RMSE (psi)'), height=550)
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                # --- TORNADO DIRIGIDO A DADOS (MONTE CARLO) ---
                 st.markdown("### 🌪️ Análise de Sensibilidade Global")
                 
                 with st.spinner("Executando Monte Carlo (10.000 amostras) para correlação não-linear..."):
@@ -258,21 +255,24 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(0.05, res_calibracao.Psat_calibrado * 0.05), n_samples)
                         p2_samples = np.clip(p2_samples, 0.5, 1.0)
                         
-                        # --- CORREÇÃO: np.vectorize() BLINDA CONTRA ARRAYS MULTIDIMENSIONAIS NO IF DO DOMÍNIO ---
-                        v_fetkovich = np.vectorize(ModelosIPR.fetkovich)
-                        aof_samples = v_fetkovich(0.0, pe_samples, p1_samples, p2_samples)
+                        # --- CORREÇÃO: List Comprehension isola os escalares e blinda contra quebras no IF ---
+                        aof_samples = np.array([
+                            ModelosIPR.fetkovich(0.0, float(pe), float(p1), float(p2)) 
+                            for pe, p1, p2 in zip(pe_samples, p1_samples, p2_samples)
+                        ])
                     else:
                         p1_samples = np.random.normal(res_calibracao.J_calibrado, res_calibracao.J_calibrado * 0.1, n_samples)
                         p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(50.0, res_calibracao.Psat_calibrado * 0.05), n_samples)
                         p2_samples = np.clip(p2_samples, 100.0, pe_samples * 0.999)
                         
-                        # --- CORREÇÃO: np.vectorize() BLINDA CONTRA ARRAYS MULTIDIMENSIONAIS NO IF DO DOMÍNIO ---
-                        v_hibrido = np.vectorize(ModelosIPR.hibrido_darcy_vogel)
-                        aof_samples = v_hibrido(0.0, pe_samples, p2_samples, p1_samples)
+                        # --- CORREÇÃO: List Comprehension isola os escalares e blinda contra quebras no IF ---
+                        aof_samples = np.array([
+                            ModelosIPR.hibrido_darcy_vogel(0.0, float(pe), float(p2), float(p1)) 
+                            for pe, p2, p1 in zip(pe_samples, p2_samples, p1_samples)
+                        ])
                         
                     df_amostras = pd.DataFrame({'Pe': pe_samples, 'P1': p1_samples, 'P2': p2_samples, 'AOF': aof_samples})
                     
-                    # Rank de Spearman substitui "Variância Explicada" conceitualmente
                     correlacoes = df_amostras[['P2', 'Pe', 'P1']].corrwith(df_amostras['AOF'], method='spearman')
                     importancia_relativa = correlacoes**2
                     impacto_percentual = (importancia_relativa / importancia_relativa.sum()) * 100
@@ -292,7 +292,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     )
                     st.plotly_chart(fig_tornado, use_container_width=True)
 
-                # --- EXPORTAÇÃO BLINDADA ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
