@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from reservatorio.domain.ipr_models import ModelosIPR
 from reservatorio.domain.calibration import DarcyVogelCalibration, FetkovichCalibration
 from reservatorio.domain.distributions import NormalDistribution, LogNormalDistribution
-from reservatorio.domain.thermal_correction import CorretorTermico # <--- IMPORT DO SEU MÓDULO TÉRMICO
+from reservatorio.domain.thermal_correction import CorretorTermico
 from reservatorio.infrastructure.repositories import JsonCalibrationRepository
 from reservatorio.application.optimization import HistoryMatchingService, generate_rmse_surface
 from reservatorio.application.montecarlo import MonteCarloIPR
@@ -97,7 +97,7 @@ if ativar_termico:
     t_ref = st.sidebar.number_input("Temp. Referência PVT (°C)", value=25.0)
     t_res = st.sidebar.number_input("Temp. do Reservatório (°C)", value=60.0)
     incerteza_pct = st.sidebar.slider("Perturbação de Propriedades (%)", -10.0, 10.0, 5.0, step=1.0)
-    st.sidebar.caption("Simula a variação térmica em relação ao modelo base do Elias.")
+    st.sidebar.caption("Simula a variação térmica em relação ao modelo base.")
 
 # Botão para limpar o histórico de curvas comparativas
 if st.sidebar.button("🗑️ Limpar Curvas Comparativas"):
@@ -179,6 +179,8 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     else:
                         q_arr_termico = ModelosIPR.hibrido_darcy_vogel(pwf_arr, pe_campo, res_calibracao.Psat_calibrado, j_termico)
                         aof_termico = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, res_calibracao.Psat_calibrado, j_termico)
+                else:
+                    aof_termico = aof_base # Prevenção de erro caso não esteja ativo
 
                 q_arr_plot = q_arr_base * fator_conv
                 q_campo_plot = q_campo * fator_conv
@@ -200,12 +202,11 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 # Curva Base Isotérmica
                 ax.plot(q_arr_plot, pwf_arr, 'b-', linewidth=3, label=f'IPR Base (AOF: {aof_plot:.0f})')
                 
-                # Curva Térmica Perturbada (A mágica acontece aqui)
+                # Curva Térmica Perturbada
                 if ativar_termico:
                     sinal = "+" if incerteza_pct >= 0 else ""
                     ax.plot(q_arr_termico * fator_conv, pwf_arr, color='#e53e3e', linewidth=3, linestyle='--', 
                             label=f'IPR Térmica ({sinal}{incerteza_pct}%) (AOF: {aof_termico*fator_conv:.0f})')
-                    # Preenchimento visual da área de incerteza térmica
                     ax.fill_betweenx(pwf_arr, q_arr_plot, q_arr_termico * fator_conv, color='#e53e3e', alpha=0.1)
 
                 ax.scatter(q_campo_plot, pwf_campo, color='black', s=60, zorder=5, label='Dados de Teste')
@@ -225,7 +226,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 st.subheader("🔍 Diagnóstico de Incerteza Numérica e Identificabilidade")
 
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
-                    # O 3D usa o J térmico se estiver ativado!
                     j_para_diagnostico = j_termico if ativar_termico else res_calibracao.J_calibrado
 
                     diag = generate_rmse_surface(
@@ -256,7 +256,6 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         else:
                             st.error(f"🚨 **Condicionamento da Matriz (CI):** {diag['condicionamento_ci']:.1f} (Mal Condicionado / Sistema Instável)")
 
-                    # Rótulos adaptativos para o Espaço de Parâmetros
                     label_x = 'Coeficiente Performance C' if is_fetkovich else 'Índice de Produtividade J'
                     label_y = 'Expoente de Turbulência n' if is_fetkovich else 'Pressão de Saturação Psat (psi)'
 
@@ -275,7 +274,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     )
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                # --- GRÁFICO DE TORNADO DE SENSIBILIDADE (PILAR 3) ---
+                # --- GRÁFICO DE TORNADO DE SENSIBILIDADE ---
                 st.markdown("### 🌪️ Análise de Sensibilidade Estatística (Gráfico de Tornado)")
                 impacto_p1 = 0.45 if is_fetkovich else (0.75 if "Monofásico" in cenario_escolhido else 0.40)
                 impacto_p2 = 0.55 if is_fetkovich else (0.01 if "Monofásico" in cenario_escolhido else 0.60)
@@ -295,7 +294,7 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 )
                 st.plotly_chart(fig_tornado, use_container_width=True)
 
-              # --- EXPORTAÇÃO EM LATEX TOTALMENTE DINÂMICA (PILAR 1) ---
+                # --- EXPORTAÇÃO EM LATEX TOTALMENTE DINÂMICA ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
@@ -329,7 +328,6 @@ Desse modo, a expans\\~ao parab\\^olica inferior fica descrita matematicamente p
     q = q_b + \\frac{{{res_calibracao.J_calibrado:.4f} \\times {res_calibracao.Psat_calibrado:.2f}}}{{1.8}} \\left[ 1 - 0.2\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right) - 0.8\\left(\\frac{{P_{{wf}}}}{{{res_calibracao.Psat_calibrado:.2f}}}\\right)^2 \\right]
 \\end{{equation}}"""
 
-                # Bloco dinâmico da Dissertação (Só entra se o Térmico estiver ativo)
                 if ativar_termico:
                     tex_termico = f"""
 \\subsection*{{3. Acoplamento T\\'ermico e An\\'alise de Sensibilidade}}
@@ -356,7 +354,6 @@ Avaliando o limite de escoamento absoluto sob press\\~ao de fundo nula ($P_{{wf}
     AOF = {aof_plot:.2f} \\text{{ {unidade_vazao}}}
 \\end{{equation}}"""
 
-                # Montagem final do arquivo LaTeX
                 latex_content = f"""\\documentclass{{article}}
 \\usepackage[T1]{{fontenc}}
 \\usepackage[utf8]{{inputenc}}
