@@ -17,6 +17,14 @@ from reservatorio.application.optimization import HistoryMatchingService, genera
 from reservatorio.application.montecarlo import MonteCarloIPR
 from reservatorio.infrastructure.interface_entrada import InterfaceEntradaDados
 
+# --- IMPORTAÇÃO ACADÊMICA: ÍNDICES DE SOBOL ---
+try:
+    from SALib.sample import saltelli
+    from SALib.analyze import sobol
+    salib_disponivel = True
+except ImportError:
+    salib_disponivel = False
+
 # --- BANCO DE DADOS SINTÉTICO (PRESETS UNIFICADO) ---
 PRESETS_POCOS = {
     "Entrada Manual / Tabela": None,
@@ -46,6 +54,9 @@ if "ghost_curves" not in st.session_state:
     st.session_state["ghost_curves"] = []
 
 st.set_page_config(page_title="Simulador IPR", page_icon="🛢️", layout="wide")
+
+if not salib_disponivel:
+    st.error("⚠️ Biblioteca SALib não encontrada. O gráfico de Sobol falhará. Por favor, execute: pip install SALib")
 
 st.title("🛢️ Simulador IPR - Análise de Produtividade")
 st.markdown("Plataforma de **History Matching** e **Acoplamento Térmico**.")
@@ -109,7 +120,7 @@ else:
     st.write("📊 **Dados de Teste de Campo Carregados:**")
     st.dataframe(pd.DataFrame({"Pwf (psi)": pwf_campo, f"Vazão ({unidade_vazao})": q_campo * fator_conv}), hide_index=True)
 
-if st.sidebar.button("Rodar Simulação", type="primary"):
+if st.sidebar.button("Rodar Simulação", type="primary") and salib_disponivel:
     if not dados_validos:
         st.error("Por favor, garanta que os dados da tabela estejam preenchidos.")
     else:
@@ -202,8 +213,15 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                 with st.spinner("Mapeando topografia de erro tridimensional..."):
                     diag = generate_rmse_surface(pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich)
 
+                    # --- CORREÇÃO DE GRAUS DE LIBERDADE DO QUI-QUADRADO ---
                     N_dados = len(pwf_campo)
-                    chi2_95 = 5.991
+                    # Fetkovich tem sempre 2 parâmetros. Darcy-Vogel pode ter 1 (se Psat for travada) ou 2.
+                    if is_fetkovich or not travar_psat:
+                        chi2_95 = 5.991 # 2 Graus de Liberdade
+                        label_dof = "2 g.l."
+                    else:
+                        chi2_95 = 3.841 # 1 Grau de Liberdade (P2 fixo)
+                        label_dof = "1 g.l."
                     
                     fator_expansao = np.sqrt(1.0 + (chi2_95 / N_dados))
                     limiar_incerteza = diag["rmse_min"] * fator_expansao
@@ -219,21 +237,22 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     col_diag1, col_diag2 = st.columns(2)
                     with col_diag1:
                         if diag["area_incerteza_pct"] < 5.0:
-                            st.success(f"✅ **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Alta Identificabilidade)")
+                            st.success(f"✅ **Região de Confiança ($\chi^2$ {label_dof}):** {diag['area_incerteza_pct']:.1f}% do domínio (Alta Identificabilidade)")
                         elif diag["area_incerteza_pct"] < 20.0:
-                            st.warning(f"⚠️ **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Incerteza Moderada)")
+                            st.warning(f"⚠️ **Região de Confiança ($\chi^2$ {label_dof}):** {diag['area_incerteza_pct']:.1f}% do domínio (Incerteza Moderada)")
                         else:
-                            st.error(f"🚨 **Região de Confiança (95%):** {diag['area_incerteza_pct']:.1f}% do domínio (Baixa Identificabilidade)")
+                            st.error(f"🚨 **Região de Confiança ($\chi^2$ {label_dof}):** {diag['area_incerteza_pct']:.1f}% do domínio (Baixa Identificabilidade)")
                             
                     with col_diag2:
+                        # --- CORREÇÃO DA NOMENCLATURA ACADÊMICA ---
                         if np.isnan(diag.get("condicionamento_ci", np.nan)):
-                            st.info("ℹ️ **Condicionamento (CI):** Região degenerada. Impossível calcular o CI com robustez geométrica.")
+                            st.info("ℹ️ **Aspect Ratio (IGA):** Região degenerada. Impossível calcular o alongamento com robustez.")
                         elif diag["condicionamento_ci"] < 10:
-                            st.success(f"✅ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Problema Bem-Posto)")
+                            st.success(f"✅ **Índice Geométrico de Alongamento (IGA):** {diag['condicionamento_ci']:.1f} (Bem-Posto)")
                         elif diag["condicionamento_ci"] < 50:
-                            st.warning(f"⚠️ **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Túnel Alongado de Erro)")
+                            st.warning(f"⚠️ **Índice Geométrico de Alongamento (IGA):** {diag['condicionamento_ci']:.1f} (Túnel de Erro)")
                         else:
-                            st.error(f"🚨 **Condicionamento (CI):** {diag['condicionamento_ci']:.1f} (Problema Mal Condicionado)")
+                            st.error(f"🚨 **Índice Geométrico de Alongamento (IGA):** {diag['condicionamento_ci']:.1f} (Degenerescência/Vale Estreito)")
 
                     label_x = 'Coeficiente Performance C' if is_fetkovich else 'Índice de Produtividade J'
                     label_y = 'Expoente de Turbulência n' if is_fetkovich else 'Pressão de Saturação Psat (psi)'
@@ -244,41 +263,53 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                     fig_3d.update_layout(scene=dict(xaxis_title=label_x, yaxis_title=label_y, zaxis_title='RMSE (psi)'), height=550)
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                st.markdown("### 🌪️ Análise de Sensibilidade Global")
+                # --- ANÁLISE GLOBAL DE SENSIBILIDADE DE SOBOL (SALib) ---
+                st.markdown("### 🌪️ Índices de Sensibilidade Global de Sobol (Primeira Ordem)")
                 
-                with st.spinner("Executando Monte Carlo (10.000 amostras) para correlação não-linear..."):
-                    n_samples = 10000
-                    pe_samples = np.random.normal(pe_campo, pe_campo * 0.05, n_samples)
+                with st.spinner("Processando Decomposição de Variância via Amostragem de Saltelli..."):
+                    # Definição dos limites para amostragem estocástica global (Uniforme)
+                    pe_bounds = [pe_campo * 0.85, pe_campo * 1.15] # +/- 15% Incerteza no Reservatório
                     
                     if is_fetkovich:
-                        p1_samples = np.random.lognormal(mean=np.log(max(1e-5, res_calibracao.J_calibrado)), sigma=0.1, size=n_samples)
-                        p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(0.05, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        p2_samples = np.clip(p2_samples, 0.5, 1.0)
-                        
-                        # --- CORREÇÃO: List Comprehension isola os escalares e blinda contra quebras no IF ---
-                        aof_samples = np.array([
-                            ModelosIPR.fetkovich(0.0, float(pe), float(p1), float(p2)) 
-                            for pe, p1, p2 in zip(pe_samples, p1_samples, p2_samples)
-                        ])
+                        p1_bounds = [max(1e-6, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
+                        p2_bounds = [0.5, 1.0] # Restrição física teórica
                     else:
-                        p1_samples = np.random.normal(res_calibracao.J_calibrado, res_calibracao.J_calibrado * 0.1, n_samples)
-                        p2_samples = np.random.normal(res_calibracao.Psat_calibrado, max(50.0, res_calibracao.Psat_calibrado * 0.05), n_samples)
-                        p2_samples = np.clip(p2_samples, 100.0, pe_samples * 0.999)
-                        
-                        # --- CORREÇÃO: List Comprehension isola os escalares e blinda contra quebras no IF ---
-                        aof_samples = np.array([
-                            ModelosIPR.hibrido_darcy_vogel(0.0, float(pe), float(p2), float(p1)) 
-                            for pe, p2, p1 in zip(pe_samples, p2_samples, p1_samples)
-                        ])
-                        
-                    df_amostras = pd.DataFrame({'Pe': pe_samples, 'P1': p1_samples, 'P2': p2_samples, 'AOF': aof_samples})
+                        p1_bounds = [max(1e-3, res_calibracao.J_calibrado * 0.5), res_calibracao.J_calibrado * 1.5]
+                        p2_bounds = [100.0, pe_campo * 0.999] # Restrição física Darcy-Vogel
+
+                    problem = {
+                        'num_vars': 3,
+                        'names': ['Pe', 'P1', 'P2'],
+                        'bounds': [pe_bounds, p1_bounds, p2_bounds]
+                    }
+
+                    # Geração amostral estrita de Saltelli para cálculo iterativo
+                    # N=2048 gera 16.384 avaliações da função (N * (2D + 2))
+                    param_values = saltelli.sample(problem, 2048)
                     
-                    correlacoes = df_amostras[['P2', 'Pe', 'P1']].corrwith(df_amostras['AOF'], method='spearman')
-                    importancia_relativa = correlacoes**2
-                    impacto_percentual = (importancia_relativa / importancia_relativa.sum()) * 100
+                    pe_samples = param_values[:, 0]
+                    p1_samples = param_values[:, 1]
+                    p2_samples = param_values[:, 2]
+
+                    # Cálculo da AOF Vetorizada para cada cenário
+                    if is_fetkovich:
+                        aof_samples = p1_samples * (pe_samples**2)**p2_samples
+                    else:
+                        aof_vogel = (p1_samples * (pe_samples - p2_samples)) + ((p1_samples * p2_samples) / 1.8)
+                        aof_darcy = p1_samples * pe_samples
+                        aof_samples = np.where(pe_samples > p2_samples, aof_vogel, aof_darcy)
+                        
+                    # Extração rigorosa dos Índices de Primeira Ordem de Sobol (S1)
+                    Si = sobol.analyze(problem, aof_samples)
+                    
+                    # Elimina ruídos numéricos residuais próximos de zero da transformada
+                    S1 = np.clip(Si['S1'], 0, None)
+                    
+                    # Normalização paramétrica percentual real de variação explicada
+                    impacto_sobol = (S1 / S1.sum()) * 100
 
                     labels_tornado = [label_y, 'Pressão Estática Pe', label_x]
-                    valores_tornado = [impacto_percentual['P2'], impacto_percentual['Pe'], impacto_percentual['P1']]
+                    valores_tornado = [impacto_sobol[2], impacto_sobol[0], impacto_sobol[1]]
 
                     fig_tornado = go.Figure(go.Bar(
                         x=valores_tornado, y=labels_tornado, orientation='h',
@@ -286,12 +317,16 @@ if st.sidebar.button("Rodar Simulação", type="primary"):
                         text=[f"{v:.1f}%" for v in valores_tornado], textposition='auto'
                     ))
                     fig_tornado.update_layout(
-                        title="Importância Relativa dos Parâmetros (Spearman Rank - 10.000 iterações)",
-                        xaxis_title="Influência Paramétrica Relativa (%)",
-                        yaxis_title="Variável Aleatória", height=300, margin=dict(l=10, r=10, b=30, t=40)
+                        title="Decomposição da Variância Explicada do Potencial MÁximo (AOF)",
+                        xaxis_title="Índice de Sobol $S_1$ (Contribuição Percentual Isolada)",
+                        yaxis_title="Parâmetros de Entrada", height=300, margin=dict(l=10, r=10, b=30, t=40)
                     )
                     st.plotly_chart(fig_tornado, use_container_width=True)
+                    
+                    # Comentário Acadêmico Automático
+                    st.caption(f"**Nota Técnica:** A matriz gerou 16.384 cenários simulados. Os Índices de Sobol atestam que **{max(zip(valores_tornado, labels_tornado))[1]}** responde de forma direta e singular por **{max(valores_tornado):.1f}%** de toda a flutuação observada no Potencial de Fluxo Absoluto (AOF).")
 
+                # --- EXPORTAÇÃO BLINDADA ---
                 st.markdown("---")
                 st.subheader("📥 Geração de Documentação Científica")
                 
