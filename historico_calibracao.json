@@ -100,5 +100,22 @@
         "cost": 1153.7541085944445,
         "message": "`ftol` termination condition is satisfied.",
         "version": "3.1.0"
+    },
+    {
+        "well_name": "Caso 1: Pré-Sal (Monofásico - Não Identificável)",
+        "date": "2026-06-11T10:04:06.756739",
+        "model": "Darcy-Vogel Híbrido (Multi-parâmetro)",
+        "J_calibrado": 1.200000000007882,
+        "Psat_calibrado": 2000.0,
+        "rmse": 1.0793058992518405e-08,
+        "mae": 9.852669791143853e-09,
+        "mape": 6.568446527429235e-12,
+        "r2": 1.0,
+        "bias": 9.852669791143853e-09,
+        "success": true,
+        "nfev": 6,
+        "cost": 2.329802448319648e-16,
+        "message": "`xtol` termination condition is satisfied.",
+        "version": "3.1.0"
     }
 ]
