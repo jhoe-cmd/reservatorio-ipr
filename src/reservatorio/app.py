@@ -100,10 +100,11 @@ class CorretorTermico:
             b = 1.7447
             c = 1.7669 - np.log10(psat_base)
             delta = b**2 - 4*a*c
-            # Trava matemática blindada contra falha não-física da correlação
+            
             if np.any(delta < 0):
-                print("AVISO: Correlação Glaso fora do domínio físico.")
-            delta_safe = np.maximum(delta, 0)
+                st.warning("⚠️ **AVISO:** Correlação Glaso extrapolou o domínio físico (Raízes complexas). O modelo limitou a alteração PVT térmica ao valor base da calibração.")
+                
+            delta_safe = np.maximum(delta, 0.0)
             x_ref = (-b + np.sqrt(delta_safe)) / (2 * a)
             
             x_res = x_ref + 0.172 * np.log10(t_res_f / t_ref_f)
@@ -138,7 +139,7 @@ class HistoryMatchingService:
             def res_func(p):
                 return ModelosIPR.fetkovich(pwf_medidos, Pe, p[0], p[1]) - q_medidos
                 
-            opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 0.2], [np.inf, 2]), method='trf')
+            opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 0.2], [np.inf, 2.0]), method='trf')
             res.J_calibrado, res.Psat_calibrado = opt.x
             
         else:
@@ -169,14 +170,10 @@ class HistoryMatchingService:
         ss_tot = np.sum((q_medidos - np.mean(q_medidos))**2)
         
         res.rmse = np.sqrt(ss_res / N)
-        res.r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        res.r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
         
         den = np.sum(np.abs(q_medidos))
-
-        if den > 0:
-            res.wmape = (np.sum(np.abs(opt.fun))/den) * 100
-        else:
-            res.wmape = np.nan
+        res.wmape = (np.sum(np.abs(opt.fun))/den) * 100.0 if den > 0 else np.nan
 
         res.aic = N * np.log(ss_res / N) + 2 * res.k_params
         if N - res.k_params - 1 > 0:
@@ -192,24 +189,21 @@ class HistoryMatchingService:
         sigma2 = ss_res / v_df
         
         try:
-            # opt.jac contém as derivadas parciais d(Residuo)/d(Parâmetro)
             J_jac = opt.jac
-            # Inversão pseudo-inversa da Hessiana aproximada (Jacobiana Transposta x Jacobiana)
             H_inv = np.linalg.pinv(J_jac.T @ J_jac)
             res.cov_mat = sigma2 * H_inv
             
-            # Matriz de Correlação
-            d = np.sqrt(np.diag(res.cov_mat))
+            d = np.sqrt(np.maximum(np.diag(res.cov_mat), 1e-15))
             res.corr_mat = res.cov_mat / np.outer(d, d)
         except Exception:
-            pass # Em caso de matriz singular severa, a covariância fica None
+            pass 
             
         return res
 
 @st.cache_data
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
-    # Malha densa de 200j para garantir contornos perfeitos no F-Test sem aliasing
-    res_malha = 200j 
+    # Malha densa para garantir contornos perfeitos no F-Test sem aliasing
+    res_malha = 100j 
     
     if is_fetkovich:
         j_grid, psat_grid = np.mgrid[max(1e-6, j_opt*0.2):j_opt*2.0:res_malha, 0.5:1.5:res_malha]
@@ -328,6 +322,12 @@ var_sobol_pct = st.sidebar.slider(
     "Incerteza Paramétrica (%)", 
     min_value=1.0, max_value=20.0, value=5.0, step=1.0
 )
+n_sobol = st.sidebar.selectbox(
+    "Amostras do Saltelli (N)",
+    [512, 1024, 2048, 4096],
+    index=1,
+    help="Define a resolução estatística do Sobol."
+)
 
 if st.sidebar.button("🗑️ Limpar Gráficos"):
     st.session_state["ghost_curves"] = []
@@ -369,11 +369,15 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 
                 col3.metric("RMSE Residual", f"{res_calibracao.rmse * fator_conv:.2f} {unidade_vazao}")
                 
-                if res_calibracao.r2 < 0:
-                    st.warning("⚠️ R² negativo: o modelo ajusta pior que uma simples média dos dados.")
+                if np.isnan(res_calibracao.r2):
+                    st.warning("⚠️ R² indefinido: Os dados experimentais não possuem variabilidade suficiente.")
+                elif res_calibracao.r2 < 0:
+                    st.warning("⚠️ R² negativo: o modelo ajusta pior que a média simples dos dados.")
+                else:
+                    col4.metric("R² Ajuste", f"{res_calibracao.r2:.4f}")
                 
                 c_aic1, c_aic2, c_aic3 = st.columns(3)
-                c_aic1.metric("WMAPE",f"{res_calibracao.wmape:.2f}%")
+                c_aic1.metric("WMAPE", f"{res_calibracao.wmape:.2f}%")
                 c_aic2.metric("AIC (Akaike)", f"{res_calibracao.aic:.2f}")
                 val_aicc = f"{res_calibracao.aicc:.2f}" if not np.isnan(res_calibracao.aicc) else "N/A"
                 c_aic3.metric("AICc (Corrigido)", val_aicc)
@@ -432,7 +436,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 st.markdown("---")
                 st.subheader("🔍 Diagnóstico de Identificabilidade (Local e Global)")
                 
-                # Seção de Matriz de Covariância
                 if res_calibracao.cov_mat is not None and res_calibracao.k_params == 2:
                     st.caption("**Estatística Assintótica Local:** Matriz de Covariância $\\sigma^2(J^TJ)^{-1}$ derivada da Jacobiana.")
                     col_mat1, col_mat2 = st.columns(2)
@@ -452,9 +455,8 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         
                     correlacao_cruzada = res_calibracao.corr_mat[0, 1]
                     if abs(correlacao_cruzada) > 0.95:
-                        st.warning(f"⚠️ **Alerta Físico:** Altíssima correlação linear cruzada detectada ({correlacao_cruzada:.2f}). O modelo apresenta ambiguidade de parametrização.")
+                        st.warning(f"⚠️ **Alerta Físico:** Altíssima correlação linear cruzada detectada ({correlacao_cruzada:.2f}). O modelo apresenta forte ambiguidade de parametrização.")
 
-                # Seção de Topografia Global (Superfície SSE)
                 j_grid, psat_grid, sse_grid, sse_min = calcular_sse_matriz_exata(
                     pwf_campo, q_campo, pe_campo, res_calibracao.J_calibrado, res_calibracao.Psat_calibrado, is_fetkovich
                 )
@@ -485,12 +487,12 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 label_x = 'C' if is_fetkovich else 'J'
                 label_y = 'n' if is_fetkovich else 'Psat'
 
-                # --- Gráfico de Contorno 2D com Elipse de Confiança Local ---
                 if res_calibracao.cov_mat is not None and res_calibracao.k_params == 2:
                     eigvals, eigvecs = np.linalg.eigh(res_calibracao.cov_mat)
+                    # Bloqueio estrito contra autovalores negativos
+                    eigvals = np.maximum(eigvals, 0)
                     
-                    # Cálculo da Elipse 95% exata (via distribuição qui-quadrado para 2 gl)
-                    f95 = stats.f.ppf(0.95,dfn=2,dfd=max(1, N_dados-2))
+                    f95 = stats.f.ppf(0.95, dfn=2, dfd=max(1, N_dados-2))
                     chi2_val = 2 * f95
                     t_ang = np.linspace(0, 2*np.pi, 100)
                     circle = np.vstack((np.cos(t_ang), np.sin(t_ang)))
@@ -508,7 +510,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     fig_2d.update_layout(title="Projeção 2D (Identificabilidade Local vs Global)", xaxis_title=label_x, yaxis_title=label_y, height=450)
                     st.plotly_chart(fig_2d, use_container_width=True)
 
-                # Gráfico 3D da Superfície SSE
                 fig_3d = go.Figure(data=[go.Surface(z=sse_grid, x=j_grid, y=psat_grid, colorscale='Viridis')])
                 fig_3d.add_trace(go.Scatter3d(
                     x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], z=[sse_min],
@@ -519,7 +520,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 
                 st.caption(f"**Nota Analítica (Limiares de Verossimilhança F-Test):** Corte 68% (SSE \u2264 {sse_limiar_68:.1f}) | Corte 95% (SSE \u2264 {sse_limiar_95:.1f}) | Corte 99% (SSE \u2264 {sse_limiar_99:.1f}).")
 
-                # Inicializa S1, ST, e percentis vazios
                 S1 = [0.0, 0.0, 0.0]
                 ST = [0.0, 0.0, 0.0]
                 P_90 = P_50 = P_10 = 0.0
@@ -529,7 +529,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     st.markdown("---")
                     st.subheader(f"🌪️ Risco Operacional e Sensibilidade Estocástica do Campo Térmico (\u00B1{var_sobol_pct}%)")
                     
-                    with st.spinner("Processando Matriz Tensorial de Sobol via Fast Saltelli (N=2048)..."):
+                    with st.spinner(f"Processando Matriz Tensorial de Sobol via Fast Saltelli (N={n_sobol})..."):
                         delta = var_sobol_pct / 100.0
                         
                         bounds_t_res = [max(0.1, t_res * (1.0 - delta)), t_res * (1.0 + delta)]
@@ -542,72 +542,67 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                             'bounds': [bounds_t_res, bounds_t_ref, bounds_ea_r]
                         }
                         
-                        param_values = sobol_sample.sample(problem, 2048)
-                        st.info(f"Amostras efetivas Sobol: {len(param_values):,}")
+                        param_values = sobol_sample.sample(problem, n_sobol)
+                        st.info(f"Amostras efetivas da matriz Sobol-Saltelli: {len(param_values):,}")
                         
                         t_res_s = param_values[:, 0]
                         t_ref_s = param_values[:, 1]
                         ea_r_s  = param_values[:, 2]
 
-                        # VETORIZAÇÃO EXTREMA (Gargalo totalmente eliminado)
+                        # VETORIZAÇÃO EXTREMA
                         j_pert_arr = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res_s, t_ref_s, ea_r_s)
                         
                         if is_fetkovich:
                             psat_pert_arr = np.full_like(t_res_s, res_calibracao.Psat_calibrado)
-                            # QoI: AOF Absoluto Operacional (Pwf = 0)
                             q_output_tensorial = ModelosIPR.fetkovich(0.0, pe_campo, j_pert_arr, psat_pert_arr) * fator_conv
                         else:
                             psat_pert_arr = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res_s, t_ref_s, correlacao_pvt)
                             q_output_tensorial = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, psat_pert_arr, j_pert_arr) * fator_conv
                             
-                        # Trava de Segurança do Sobol
-                        if np.var(q_output_tensorial) < 1e-12:
-                            st.warning("⚠️ **Alerta:** A variância da saída térmica é próxima a zero. Os índices de Sobol estarão instáveis devido a ruído numérico ou modelo não reativo.")
-                        
-                        P_90 = np.percentile(q_output_tensorial, 10)
-                        P_50 = np.percentile(q_output_tensorial, 50)
-                        P_10 = np.percentile(q_output_tensorial, 90)
-
-                        c_p10, c_p50, c_p90 = st.columns(3)
-                        c_p90.metric("AOF Térmico P90 (Pessimista)", f"{P_90:.0f} {unidade_vazao}")
-                        c_p50.metric("AOF Térmico P50 (Mediana)", f"{P_50:.0f} {unidade_vazao}")
-                        c_p10.metric("AOF Térmico P10 (Otimista)", f"{P_10:.0f} {unidade_vazao}")
-                        
-                        # Extração dos Índices Sobol sobre o Tensor Instantâneo
+                        # Trava de Segurança Estatística do Sobol
                         mask_valid = np.isfinite(q_output_tensorial)
-
-                        if np.sum(mask_valid) < len(q_output_tensorial):
-                            st.warning(f"⚠️ {len(q_output_tensorial)-np.sum(mask_valid)} amostras inválidas removidas da análise Sobol.")
-
-                            q_output_tensorial = q_output_tensorial[mask_valid]
-
-                        Si = sobol.analyze(problem, q_output_tensorial)
-                        S1 = Si['S1']
-                        ST = Si['ST']
                         
-                        s1_map = dict(zip(problem['names'], S1))
-                        st_map = dict(zip(problem['names'], ST))
-                        
-                        labels_tornado = ['Razão Arrhenius (Ea/R)', 'T. Referência (PVT)', 'T. Reservatório']
-                        s1_plot = [s1_map['Ea/R'], s1_map['T_Referencia'], s1_map['T_Reservatorio']]
-                        st_plot = [st_map['Ea/R'], st_map['T_Referencia'], st_map['T_Reservatorio']]
+                        if not np.all(mask_valid):
+                            st.error("🚨 Valores inválidos (NaN/Inf) detectados na propagação termodinâmica. Análise de Sobol abortada.")
+                        elif np.var(q_output_tensorial) < 1e-12:
+                            st.warning("⚠️ **Alerta Estatístico:** A variância da saída do modelo é praticamente zero. Índices de Sobol apresentarão instabilidade severa.")
+                        else:
+                            P_90 = np.percentile(q_output_tensorial, 10)
+                            P_50 = np.percentile(q_output_tensorial, 50)
+                            P_10 = np.percentile(q_output_tensorial, 90)
 
-                        fig_sobol = go.Figure()
-                        fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Impacto Isolado)', marker_color='#3182ce'))
-                        fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Impacto Total c/ Interação)', marker_color='#e53e3e'))
+                            c_p10, c_p50, c_p90 = st.columns(3)
+                            c_p90.metric("AOF Térmico P90 (Pessimista)", f"{P_90:.0f} {unidade_vazao}")
+                            c_p50.metric("AOF Térmico P50 (Mediana)", f"{P_50:.0f} {unidade_vazao}")
+                            c_p10.metric("AOF Térmico P10 (Otimista)", f"{P_10:.0f} {unidade_vazao}")
+                            
+                            Si = sobol.analyze(problem, q_output_tensorial)
+                            S1 = Si['S1']
+                            ST = Si['ST']
+                            
+                            s1_map = dict(zip(problem['names'], S1))
+                            st_map = dict(zip(problem['names'], ST))
+                            
+                            labels_tornado = ['Razão Arrhenius (Ea/R)', 'T. Referência (PVT)', 'T. Reservatório']
+                            s1_plot = [s1_map['Ea/R'], s1_map['T_Referencia'], s1_map['T_Reservatorio']]
+                            st_plot = [st_map['Ea/R'], st_map['T_Referencia'], st_map['T_Reservatorio']]
 
-                        fig_sobol.update_layout(
-                            title=f"Decomposição de Variância do Potencial Operacional (AOF)",
-                            xaxis_title="Índice de Sobol (Fração da Incerteza Explicada)",
-                            barmode='group', height=400
-                        )
-                        st.plotly_chart(fig_sobol, use_container_width=True)
-                        
-                        idx_max_s1 = np.argmax(S1)
-                        nome_max = problem['names'][idx_max_s1]
-                        
-                        st.caption(f"**Análise da Dissertação (Vetorização Tensorial):** O *Quantity of Interest (QoI)* utilizado foi o **Potencial Máximo Operacional (AOF)**, blindado contra artefatos de escala. Avaliadas {len(q_output_tensorial)} simulações paramétricas simultâneas. O indicador global atesta que **{nome_max}** comanda isoladamente **{S1[idx_max_s1]*100:.1f}%** do desvio padrão esperado da capacidade de entrega térmica.")
-                        st.info("""Modelo térmico semi-acoplado: a temperatura altera J e Psat, mas Pe é mantida constante. Os resultados representam sensibilidade relativa e não simulação PVT totalmente acoplada.""")
+                            fig_sobol = go.Figure()
+                            fig_sobol.add_trace(go.Bar(y=labels_tornado, x=s1_plot, orientation='h', name='S1 (Impacto Isolado)', marker_color='#3182ce'))
+                            fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Impacto Total c/ Interação)', marker_color='#e53e3e'))
+
+                            fig_sobol.update_layout(
+                                title=f"Decomposição de Variância do Potencial Operacional (AOF)",
+                                xaxis_title="Índice de Sobol (Fração da Incerteza Explicada)",
+                                barmode='group', height=400
+                            )
+                            st.plotly_chart(fig_sobol, use_container_width=True)
+                            
+                            idx_max_s1 = np.argmax(S1)
+                            nome_max = problem['names'][idx_max_s1]
+                            
+                            st.caption(f"**Análise da Dissertação (Vetorização Tensorial):** O *Quantity of Interest (QoI)* utilizado foi o **Potencial Máximo Operacional (AOF)**, blindado contra artefatos de escala. Avaliadas {len(q_output_tensorial)} simulações paramétricas simultâneas com método de Saltelli. O indicador global atesta que **{nome_max}** comanda isoladamente **{S1[idx_max_s1]*100:.1f}%** da incerteza propagada no reservatório.")
+                            st.info("""Modelo térmico semi-acoplado (Dissertação): a temperatura perturba J (via mu) e Psat, mas Pe é mantida constante na região produtiva explorada.""")
                 else:
                     st.info("Ative o 'Acoplamento Forward' na barra lateral para habilitar a Análise de Risco (P10/50/90) e o Sobol do campo térmico.")
 
@@ -619,12 +614,11 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 str_p = f"{res_calibracao.Psat_calibrado:.2f}"
                 str_pe = f"{pe_campo:.2f}"
                 str_rmse = f"{res_calibracao.rmse * fator_conv:.2f}"
-                str_r2 = f"{res_calibracao.r2:.4f}"
+                str_r2 = f"{res_calibracao.r2:.4f}" if not np.isnan(res_calibracao.r2) else "N/A"
                 str_aic = f"{res_calibracao.aic:.2f}"
                 str_wmape = f"{res_calibracao.wmape:.2f}"
                 str_aof = f"{aof_plot:.2f}"
                 
-                # Formatando as matrizes de covariância para o LaTeX se existirem
                 str_cov = "Matriz de Covari\\^ancia N\\~ao Calculada (Singular/Degenerada)"
                 if res_calibracao.cov_mat is not None and res_calibracao.k_params == 2:
                     str_cov = (f"C(1,1)={res_calibracao.cov_mat[0,0]:.2e}, C(2,2)={res_calibracao.cov_mat[1,1]:.2e}, "
