@@ -101,8 +101,8 @@ class CorretorTermico:
             c = 1.7669 - np.log10(psat_base)
             delta = b**2 - 4*a*c
             # Trava matemática blindada contra falha não-física da correlação
-        if np.any(delta < 0):
-            print("AVISO: Correlação Glaso fora do domínio físico.")
+            if np.any(delta < 0):
+                print("AVISO: Correlação Glaso fora do domínio físico.")
             delta_safe = np.maximum(delta, 0)
             x_ref = (-b + np.sqrt(delta_safe)) / (2 * a)
             
@@ -171,9 +171,13 @@ class HistoryMatchingService:
         res.rmse = np.sqrt(ss_res / N)
         res.r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
         
-        res.wmape = (np.sum(np.abs(opt.fun))/np.sum(np.abs(q_medidos))) * 100
-        
-        
+        den = np.sum(np.abs(q_medidos))
+
+        if den > 0:
+            res.wmape = (np.sum(np.abs(opt.fun))/den) * 100
+        else:
+            res.wmape = np.nan
+
         res.aic = N * np.log(ss_res / N) + 2 * res.k_params
         if N - res.k_params - 1 > 0:
             res.aicc = res.aic + (2 * res.k_params * (res.k_params + 1)) / (N - res.k_params - 1)
@@ -617,7 +621,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 str_rmse = f"{res_calibracao.rmse * fator_conv:.2f}"
                 str_r2 = f"{res_calibracao.r2:.4f}"
                 str_aic = f"{res_calibracao.aic:.2f}"
-                str_mape = f"{res_calibracao.mape:.2f}"
+                str_wmape = f"{res_calibracao.wmape:.2f}"
                 str_aof = f"{aof_plot:.2f}"
                 
                 # Formatando as matrizes de covariância para o LaTeX se existirem
@@ -638,7 +642,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 \\begin{{itemize}}
   \\item Coeficiente de Determina\\c{{c}}\\~ao ($R^2$): {str_r2}
   \\item RMSE Residual do Truncamento: {str_rmse} {unidade_vazao}
-  \\item MAPE: {str_mape}\\%
+  \\item WMAPE: {str_wmape}\\%
   \\item Crit\\'erio de Informa\\c{{c}}\\~ao (AIC): {str_aic}
   \\item Parametro 1 (J/C) Convergido: {str_j}
   \\item Parametro 2 (Psat/n) Convergido: {str_p}
@@ -690,8 +694,8 @@ AOF estabilizado: {str_aof} {unidade_vazao}.
                     st.download_button(label="🖩 Baixar Memorial LaTeX", data=latex_content, file_name=f"memorial_{well_name}.tex")
                 with col_btn2:
                     df_rel = pd.DataFrame({
-                        "Parâmetro": ["Poço", "RMSE", "R2", "AIC", "MAPE", "AOF Base", "AOF Térmico", "P90", "P50", "P10"],
-                        "Valor": [well_name, str_rmse, str_r2, str_aic, str_mape, str_aof, 
+                        "Parâmetro": ["Poço", "RMSE", "R2", "AIC", "WMAPE", "AOF Base", "AOF Térmico", "P90", "P50", "P10"],
+                        "Valor": [well_name, str_rmse, str_r2, str_aic, str_wmape, str_aof, 
                                   f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-",
                                   f"{P_90:.1f}" if ativar_termico else "-", f"{P_50:.1f}" if ativar_termico else "-", f"{P_10:.1f}" if ativar_termico else "-"]
                     })
