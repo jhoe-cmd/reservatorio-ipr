@@ -362,7 +362,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     col2.metric("Psat Otimizada", f"{res_calibracao.Psat_calibrado:.1f} psi")
                 
                 col3.metric("RMSE Residual", f"{res_calibracao.rmse * fator_conv:.2f} {unidade_vazao}")
-                col4.metric("R² Ajuste", f"{res_calibracao.r2:.4f}")
+                
+                if res_calibracao.r2 < 0:
+                    st.warning("⚠️ R² negativo: o modelo ajusta pior que uma simples média dos dados.")
                 
                 c_aic1, c_aic2, c_aic3 = st.columns(3)
                 c_aic1.metric("MAPE (Erro Médio %)", f"{res_calibracao.mape:.2f}%")
