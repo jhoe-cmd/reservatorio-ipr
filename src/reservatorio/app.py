@@ -505,7 +505,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         try:
                             integral_q = np.trapezoid(q_tensor, pwf_array_fixo, axis=1)
                         except AttributeError:
-                            integral_q = np.trapz(q_tensor, pwf_array_fixo, axis=1)
+                            integral_q = np.trapezoid(q_tensor, pwf_array_fixo, axis=1)
                             
                         # Vetor de Produtividade Global em (Unidade de Vazão)
                         q_output_tensorial = (integral_q / pe_campo) * fator_conv
