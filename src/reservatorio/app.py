@@ -289,7 +289,7 @@ is_fetkovich = (modelo_escolhido == "Fetkovich")
 
 if is_fetkovich:
     param1_guess = st.sidebar.number_input("Chute C (Coeficiente)", value=0.001, format="%.5f")
-    param2_guess = st.sidebar.number_input("Chute n (Expoente)", value=0.8, min_value=0.2, max_value=2)
+    param2_guess = st.sidebar.number_input("Chute n (Expoente)", value=0.8, min_value=0.2, max_value=2.0)
     param2_conhecido = None
     travar_psat = False
 else:
