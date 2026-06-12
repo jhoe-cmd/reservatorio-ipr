@@ -190,7 +190,7 @@ class HistoryMatchingService:
 
 @st.cache_data
 def calcular_sse_matriz_exata(pwf_medidos, q_medidos, pe, j_opt, psat_opt, is_fetkovich):
-    res_malha = 100j 
+    res_malha = 200j 
     
     if is_fetkovich:
         j_grid, psat_grid = np.mgrid[max(1e-6, j_opt*0.2):j_opt*2.0:res_malha, 0.5:1.0:res_malha]
