@@ -17,7 +17,7 @@ try:
     salib_disponivel = True
 except ImportError:
     try:
-        from SALib.sample import saltelli as sobol_sample # Fallback para versões mais antigas
+        from SALib.sample import saltelli as sobol_sample # Fallback
         from SALib.analyze import sobol
         salib_disponivel = True
     except:
@@ -69,13 +69,49 @@ class CorretorTermico:
         return np.maximum(1e-8, j_base * multiplicador_exponencial)
 
     @staticmethod
-    def ajustar_Psat(psat_base, t_res, t_ref):
+    def ajustar_Psat(psat_base, t_res, t_ref, correlacao="Standing"):
         """ 
-        Ajuste físico fenomenológico: Aumento de temperatura expande gás em solução (Standing).
-        Implementada uma aproximação de sensibilidade térmica empírica (+0.2% / °C).
+        Ajuste termodinâmico rigoroso da Pressão de Bolha (Psat).
+        Isolamos matematicamente o fator térmico de 4 correlações PVT clássicas,
+        permitindo vetorização direta para o Sobol sem perda de graus de liberdade.
         """
-        fator_expansao = 1.0 + 0.002 * (t_res - t_ref)
-        return psat_base * fator_expansao
+        t_ref_f = (t_ref * 1.8) + 32.0
+        t_res_f = (t_res * 1.8) + 32.0
+        
+        if correlacao == "Standing":
+            # Fatoração analítica Exata de Standing (1947)
+            psat_nova = (psat_base + 25.48) * (10 ** (0.00091 * (t_res_f - t_ref_f))) - 25.48
+            return np.maximum(14.7, psat_nova)
+            
+        elif correlacao == "Vazquez-Beggs":
+            # Fatoração de Vazquez-Beggs (1980) assumindo API nominal = 30
+            t_ref_r = t_ref_f + 460.0
+            t_res_r = t_res_f + 460.0
+            psat_nova = psat_base * np.exp(-705.586 * ((1.0 / t_res_r) - (1.0 / t_ref_r)))
+            return np.maximum(14.7, psat_nova)
+            
+        elif correlacao == "Glaso":
+            # Inversão quadrática da correlação de Glaso (1980) para isolar T^0.172
+            a = -0.30218
+            b = 1.7447
+            c = 1.7669 - np.log10(psat_base)
+            
+            delta = np.maximum(b**2 - 4*a*c, 0.0)
+            # A raiz física é a que garante a monotonicidade térmica na região do Black Oil
+            x_ref = (-b + np.sqrt(delta)) / (2 * a)
+            
+            x_res = x_ref + 0.172 * np.log10(t_res_f / t_ref_f)
+            log_psat_nova = 1.7669 + 1.7447 * x_res + a * (x_res ** 2)
+            return np.maximum(14.7, 10 ** log_psat_nova)
+            
+        elif correlacao == "Petrosky-Farshad":
+            # Fatoração analítica de Petrosky e Farshad (1993)
+            k = 4.561e-5
+            shift = k * ((t_res_f ** 1.3911) - (t_ref_f ** 1.3911))
+            psat_nova = psat_base * (10 ** shift)
+            return np.maximum(14.7, psat_nova)
+            
+        return psat_base
 
 # ==============================================================================
 # CAMADA DE SERVIÇO E INFERÊNCIA ESTATÍSTICA (OLS e R²)
@@ -191,7 +227,7 @@ if not salib_disponivel:
     st.error("⚠️ Biblioteca SALib não encontrada. O gráfico de Sobol falhará. Execute no terminal: pip install SALib")
 
 st.title("🛢️ Simulador IPR - Física Aplicada & Sensibilidade Térmica")
-st.markdown("Pipeline analítico com otimização TRF, termodinâmica Arrhenius estendida e Sobol Vetorizado.")
+st.markdown("Pipeline analítico com otimização TRF, termodinâmica Arrhenius estendida (PVT) e Sobol Vetorizado.")
 
 st.sidebar.header("📚 Carregar Cenário Experimental")
 cenario_escolhido = st.sidebar.selectbox("Preset:", list(PRESETS_POCOS.keys()))
@@ -226,6 +262,13 @@ fator_conv = 1.0 if unidade_vazao == "bbl/d" else 0.158987
 st.sidebar.markdown("---")
 st.sidebar.header("🌡️ Campo de Temperatura (Dissertação Elias)")
 ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Forward", value=True)
+
+correlacao_pvt = st.sidebar.selectbox(
+    "Correlação PVT para Psat(T)", 
+    ["Standing", "Vazquez-Beggs", "Glaso", "Petrosky-Farshad"],
+    help="Define a equação empírica para corrigir a expansão do gás em solução com a temperatura."
+)
+
 t_ref = st.sidebar.number_input("T Ref PVT (°C)", value=25.0)
 t_res = st.sidebar.number_input("T Reservatório (°C)", value=60.0)
 ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0)
@@ -293,8 +336,8 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 if ativar_termico:
                     j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, ea_r)
                     
-                    # Correção Física do Ponto 7: Temperatura altera as propriedades PVT (Psat)
-                    psat_termica = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res, t_ref) if not is_fetkovich else res_calibracao.Psat_calibrado
+                    # Aplicação rigorosa das correlações PVT (Standing, Vazquez-Beggs, etc.)
+                    psat_termica = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res, t_ref, correlacao_pvt) if not is_fetkovich else res_calibracao.Psat_calibrado
                     
                     if is_fetkovich:
                         q_arr_termico = ModelosIPR.fetkovich(pwf_arr, pe_campo, j_termico, psat_termica)
@@ -309,7 +352,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 q_arr_plot = q_arr_base * fator_conv
                 aof_plot = aof_base * fator_conv
                 
-                # --- CORREÇÃO DO EIXO X (Limite Dimensional Seguro) ---
                 aof_termico_plot = aof_termico * fator_conv
                 q_arr_plot_t = q_arr_termico * fator_conv if ativar_termico else q_arr_plot
                 
@@ -346,7 +388,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 v_df = N_dados - p_livres
                 
                 if v_df > 0:
-                    # Inclusão de Multiplos Níveis de Confiança para Dissertação (Ponto 5)
+                    # Inclusão de Multiplos Níveis de Confiança para Dissertação
                     f_68 = stats.f.ppf(0.68, dfn=p_livres, dfd=v_df)
                     f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
                     f_99 = stats.f.ppf(0.99, dfn=p_livres, dfd=v_df)
@@ -407,16 +449,15 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         t_ref_s = param_values[:, 1]
                         ea_r_s  = param_values[:, 2]
 
-                        # VETORIZAÇÃO PURA: As mais de 8000 amostras processadas sem For Loop
+                        # VETORIZAÇÃO PURA: As mais de 8000 amostras processadas instantaneamente
                         j_pert_arr = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res_s, t_ref_s, ea_r_s)
                         
                         if is_fetkovich:
                             psat_pert_arr = np.full_like(t_res_s, res_calibracao.Psat_calibrado)
-                            # QoI: AOF Absoluto Operacional (Pwf = 0)
                             q_output_tensorial = ModelosIPR.fetkovich(0.0, pe_campo, j_pert_arr, psat_pert_arr)
                         else:
-                            psat_pert_arr = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res_s, t_ref_s)
-                            # QoI: AOF Absoluto Operacional (Pwf = 0)
+                            # Correlação rigorosa inserida no tensor probabilístico
+                            psat_pert_arr = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res_s, t_ref_s, correlacao_pvt)
                             q_output_tensorial = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, psat_pert_arr, j_pert_arr)
                             
                         # Extração dos Índices sobre o Output Tensorial Instantâneo
@@ -488,6 +529,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 \\begin{{itemize}}
   \\item Delta de Temperatura: {t_ref}C a {t_res}C
   \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K
+  \\item Correla\\c{{c}}\\~ao PVT Acoplada: {correlacao_pvt}
   \\item Tensor Exponencial de Fluxo (J): {str_mult}
   \\item Psat Corrigida Termicamente: {str_psat_t} psi
   \\item AOF Base: {str_aof} {unidade_vazao}
