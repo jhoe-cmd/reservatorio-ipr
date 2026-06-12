@@ -11,13 +11,12 @@ from scipy.optimize import least_squares
 
 # --- IMPORTAÇÃO ACADÊMICA: ÍNDICES DE SOBOL ---
 try:
-    # Sintaxe atualizada do SALib (evita warnings)
     from SALib.sample import sobol as sobol_sample
     from SALib.analyze import sobol
     salib_disponivel = True
 except ImportError:
     try:
-        from SALib.sample import saltelli as sobol_sample # Fallback
+        from SALib.sample import saltelli as sobol_sample
         from SALib.analyze import sobol
         salib_disponivel = True
     except:
@@ -29,8 +28,15 @@ except ImportError:
 class ModelosIPR:
     @staticmethod
     def hibrido_darcy_vogel(pwf, pe, psat, j):
+        """
+        Modelo Híbrido C1 Contínuo.
+        Nota Matemática para Dissertação (Prova de Continuidade):
+        - Em Darcy (Pwf > Psat): dq/dPwf = -J
+        - Em Vogel (Pwf < Psat): dq/dPwf = -J/1.8 * [0.2 + 1.6*(Pwf/Psat)]
+        - No limite Pwf -> Psat: dq/dPwf = -J/1.8 * [1.8] = -J
+        O gradiente é perfeitamente suave, evitando mínimos locais falsos na Otimização OLS.
+        """
         pwf = np.asarray(pwf)
-        # Inferência de shape suportando escalares e matrizes de N-dimensões
         shape = np.broadcast(pwf, pe, psat, j).shape
         q = np.zeros(shape, dtype=float)
         
@@ -62,50 +68,56 @@ class ModelosIPR:
 
 class CorretorTermico:
     @staticmethod
-    def ajustar_indice_J(j_base, t_res, t_ref, ea_r):
+    def calcular_razao_viscosidade(t_res, t_ref, ea_r):
+        """
+        Isolamento Físico Estrito: A temperatura afeta a Viscosidade (mu) via Arrhenius.
+        mu(T) = A * exp(Ea / RT). Logo: mu(T_ref) / mu(T_res) = exp[ (Ea/R) * (1/T_ref - 1/T_res) ]
+        """
         tk_res = t_res + 273.15
         tk_ref = t_ref + 273.15
-        multiplicador_exponencial = np.exp(-ea_r * ((1.0 / tk_res) - (1.0 / tk_ref)))
-        return np.maximum(1e-8, j_base * multiplicador_exponencial)
+        return np.exp(ea_r * ((1.0 / tk_ref) - (1.0 / tk_res)))
+
+    @staticmethod
+    def ajustar_indice_J(j_base, t_res, t_ref, ea_r):
+        """ 
+        J é proporcional a k*h / (mu * B). 
+        Portanto: J(T) = J_ref * [mu(T_ref) / mu(T_res)] 
+        """
+        razao_mu = CorretorTermico.calcular_razao_viscosidade(t_res, t_ref, ea_r)
+        return np.maximum(1e-8, j_base * razao_mu)
 
     @staticmethod
     def ajustar_Psat(psat_base, t_res, t_ref, correlacao="Standing"):
-        """ 
-        Ajuste termodinâmico rigoroso da Pressão de Bolha (Psat).
-        Isolamos matematicamente o fator térmico de 4 correlações PVT clássicas,
-        permitindo vetorização direta para o Sobol sem perda de graus de liberdade.
-        """
+        """Ajuste PVT térmico rigoroso com blindagem contra deltas negativos (Glaso)."""
         t_ref_f = (t_ref * 1.8) + 32.0
         t_res_f = (t_res * 1.8) + 32.0
         
         if correlacao == "Standing":
-            # Fatoração analítica Exata de Standing (1947)
             psat_nova = (psat_base + 25.48) * (10 ** (0.00091 * (t_res_f - t_ref_f))) - 25.48
             return np.maximum(14.7, psat_nova)
             
         elif correlacao == "Vazquez-Beggs":
-            # Fatoração de Vazquez-Beggs (1980) assumindo API nominal = 30
             t_ref_r = t_ref_f + 460.0
             t_res_r = t_res_f + 460.0
             psat_nova = psat_base * np.exp(-705.586 * ((1.0 / t_res_r) - (1.0 / t_ref_r)))
             return np.maximum(14.7, psat_nova)
             
         elif correlacao == "Glaso":
-            # Inversão quadrática da correlação de Glaso (1980) para isolar T^0.172
             a = -0.30218
             b = 1.7447
             c = 1.7669 - np.log10(psat_base)
             
-            delta = np.maximum(b**2 - 4*a*c, 0.0)
-            # A raiz física é a que garante a monotonicidade térmica na região do Black Oil
-            x_ref = (-b + np.sqrt(delta)) / (2 * a)
+            delta = b**2 - 4*a*c
+            # Prevenção de falha física severa (bug reportado na literatura)
+            delta_safe = np.where(delta < 0, 0, delta)
+            x_ref = (-b + np.sqrt(delta_safe)) / (2 * a)
             
             x_res = x_ref + 0.172 * np.log10(t_res_f / t_ref_f)
             log_psat_nova = 1.7669 + 1.7447 * x_res + a * (x_res ** 2)
-            return np.maximum(14.7, 10 ** log_psat_nova)
+            psat_nova = np.where(delta < 0, psat_base, 10 ** log_psat_nova)
+            return np.maximum(14.7, psat_nova)
             
         elif correlacao == "Petrosky-Farshad":
-            # Fatoração analítica de Petrosky e Farshad (1993)
             k = 4.561e-5
             shift = k * ((t_res_f ** 1.3911) - (t_ref_f ** 1.3911))
             psat_nova = psat_base * (10 ** shift)
@@ -114,14 +126,17 @@ class CorretorTermico:
         return psat_base
 
 # ==============================================================================
-# CAMADA DE SERVIÇO E INFERÊNCIA ESTATÍSTICA (OLS e R²)
+# CAMADA DE SERVIÇO E INFERÊNCIA ESTATÍSTICA (OLS, AIC, AICc)
 # ==============================================================================
 class HistoryMatchingService:
     def calibrar(self, well_name, pwf_medidos, q_medidos, Pe, param1_guess, param2_guess, param2_conhecido, is_fetkovich):
         class ResResultado: pass
         res = ResResultado()
         
+        N = len(pwf_medidos)
+        
         if is_fetkovich:
+            k_params = 2
             p1_start = max(1e-6, param1_guess)
             p2_start = np.clip(param2_guess, 0.5, 1.0)
             
@@ -135,6 +150,7 @@ class HistoryMatchingService:
             p1_start = max(1e-6, param1_guess)
             
             if param2_conhecido is not None:
+                k_params = 1
                 psat_fixa = min(param2_conhecido, Pe * 0.99)
                 def res_func(p):
                     return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, psat_fixa, p[0]) - q_medidos
@@ -143,6 +159,7 @@ class HistoryMatchingService:
                 res.J_calibrado = opt.x[0]
                 res.Psat_calibrado = psat_fixa
             else:
+                k_params = 2
                 p2_start = np.clip(param2_guess, 14.7, Pe * 0.99)
                 def res_func(p):
                     return ModelosIPR.hibrido_darcy_vogel(pwf_medidos, Pe, p[1], p[0]) - q_medidos
@@ -150,11 +167,24 @@ class HistoryMatchingService:
                 opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 14.7], [np.inf, Pe * 0.999]), method='trf')
                 res.J_calibrado, res.Psat_calibrado = opt.x
                 
-        # --- Cálculo Estatístico Avançado (RMSE e R²) ---
+        # --- Cálculo de Métricas Científicas Avançadas ---
         ss_res = np.sum(opt.fun**2)
         ss_tot = np.sum((q_medidos - np.mean(q_medidos))**2)
+        
+        res.rmse = np.sqrt(ss_res / N)
         res.r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-        res.rmse = np.sqrt(np.mean(opt.fun**2))
+        
+        # MAPE (Evitando divisão por zero)
+        q_safe = np.where(q_medidos == 0, 1e-6, q_medidos)
+        res.mape = np.mean(np.abs(opt.fun / q_safe)) * 100.0
+        
+        # Critério de Informação de Akaike (Seleção de Modelos)
+        res.aic = N * np.log(ss_res / N) + 2 * k_params
+        if N - k_params - 1 > 0:
+            res.aicc = res.aic + (2 * k_params * (k_params + 1)) / (N - k_params - 1)
+        else:
+            res.aicc = np.nan
+            
         return res
 
 @st.cache_data
@@ -227,7 +257,7 @@ if not salib_disponivel:
     st.error("⚠️ Biblioteca SALib não encontrada. O gráfico de Sobol falhará. Execute no terminal: pip install SALib")
 
 st.title("🛢️ Simulador IPR - Física Aplicada & Sensibilidade Térmica")
-st.markdown("Pipeline analítico com otimização TRF, termodinâmica Arrhenius estendida (PVT) e Sobol Vetorizado.")
+st.markdown("Framework de Dissertação: Otimização TRF, Métricas Akaike, Termodinâmica e Análise Estocástica Global.")
 
 st.sidebar.header("📚 Carregar Cenário Experimental")
 cenario_escolhido = st.sidebar.selectbox("Preset:", list(PRESETS_POCOS.keys()))
@@ -260,13 +290,12 @@ unidade_vazao = st.sidebar.radio("Unidade de Vazão", ["bbl/d", "m³/d"], horizo
 fator_conv = 1.0 if unidade_vazao == "bbl/d" else 0.158987
 
 st.sidebar.markdown("---")
-st.sidebar.header("🌡️ Campo de Temperatura (Dissertação Elias)")
+st.sidebar.header("🌡️ Campo de Temperatura PVT")
 ativar_termico = st.sidebar.checkbox("Ativar Acoplamento Forward", value=True)
 
 correlacao_pvt = st.sidebar.selectbox(
     "Correlação PVT para Psat(T)", 
-    ["Standing", "Vazquez-Beggs", "Glaso", "Petrosky-Farshad"],
-    help="Define a equação empírica para corrigir a expansão do gás em solução com a temperatura."
+    ["Standing", "Vazquez-Beggs", "Glaso", "Petrosky-Farshad"]
 )
 
 t_ref = st.sidebar.number_input("T Ref PVT (°C)", value=25.0)
@@ -274,11 +303,10 @@ t_res = st.sidebar.number_input("T Reservatório (°C)", value=60.0)
 ea_r = st.sidebar.slider("Constante Aparente (Ea/R) em K", 500.0, 5000.0, 2000.0, step=100.0)
 
 st.sidebar.markdown("---")
-st.sidebar.header("🌪️ Sensibilidade Estocástica do Campo Térmico")
+st.sidebar.header("🌪️ Sensibilidade Estocástica do Campo")
 var_sobol_pct = st.sidebar.slider(
-    "Incerteza Paramétrica Térmica (%)", 
-    min_value=1.0, max_value=20.0, value=5.0, step=1.0, 
-    help="Janela de ruído nos sensores de temperatura e calibração de laboratório (T_res, T_ref, Ea/R)."
+    "Incerteza Paramétrica (%)", 
+    min_value=1.0, max_value=20.0, value=5.0, step=1.0
 )
 
 if st.sidebar.button("🗑️ Limpar Gráficos"):
@@ -309,7 +337,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     param1_guess, param2_guess, param2_conhecido, is_fetkovich
                 )
 
-                st.subheader("Resultados da Minimização de Erros OLS")
+                st.subheader("Seleção de Modelos e Mínimos Quadrados OLS")
                 col1, col2, col3, col4 = st.columns(4)
                 
                 if is_fetkovich:
@@ -319,9 +347,14 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     col1.metric("J Base", f"{res_calibracao.J_calibrado:.4f}")
                     col2.metric("Psat Otimizada", f"{res_calibracao.Psat_calibrado:.1f} psi")
                 
-                # --- CORREÇÃO DA UNIDADE DE RMSE E INCLUSÃO DE R² ---
                 col3.metric("RMSE Residual", f"{res_calibracao.rmse * fator_conv:.2f} {unidade_vazao}")
-                col4.metric("R² (Ajuste)", f"{res_calibracao.r2:.4f}")
+                col4.metric("R² Ajuste", f"{res_calibracao.r2:.4f}")
+                
+                c_aic1, c_aic2, c_aic3 = st.columns(3)
+                c_aic1.metric("MAPE (Erro Médio %)", f"{res_calibracao.mape:.2f}%")
+                c_aic2.metric("AIC (Akaike)", f"{res_calibracao.aic:.2f}")
+                val_aicc = f"{res_calibracao.aicc:.2f}" if not np.isnan(res_calibracao.aicc) else "N/A"
+                c_aic3.metric("AICc (Corrigido)", val_aicc)
 
                 # --- 2. CURVA IPR E FORWARD TÉRMICO FÍSICO CORRIGIDO ---
                 pwf_arr = np.linspace(pe_campo, 0, 100)
@@ -335,8 +368,6 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 
                 if ativar_termico:
                     j_termico = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res, t_ref, ea_r)
-                    
-                    # Aplicação rigorosa das correlações PVT (Standing, Vazquez-Beggs, etc.)
                     psat_termica = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res, t_ref, correlacao_pvt) if not is_fetkovich else res_calibracao.Psat_calibrado
                     
                     if is_fetkovich:
@@ -384,11 +415,13 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 )
 
                 N_dados = len(pwf_campo)
+                if N_dados < 8:
+                    st.warning("⚠️ **Aviso Metodológico:** A matriz de calibração possui menos de 8 pontos de teste. Os graus de liberdade são estreitos e a fronteira F-Test para a Região de Confiança pode ser superestimada.")
+
                 p_livres = 2 if (is_fetkovich or not travar_psat) else 1
                 v_df = N_dados - p_livres
                 
                 if v_df > 0:
-                    # Inclusão de Multiplos Níveis de Confiança para Dissertação
                     f_68 = stats.f.ppf(0.68, dfn=p_livres, dfd=v_df)
                     f_95 = stats.f.ppf(0.95, dfn=p_livres, dfd=v_df)
                     f_99 = stats.f.ppf(0.99, dfn=p_livres, dfd=v_df)
@@ -419,18 +452,19 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 st.plotly_chart(fig_3d, use_container_width=True)
                 
                 if v_df > 0:
-                    st.caption(f"**Nota Analítica (Thresholds de Verossimilhança):** Corte 68% (SSE \u2264 {sse_limiar_68:.1f}) | Corte 95% (SSE \u2264 {sse_limiar_95:.1f}) | Corte 99% (SSE \u2264 {sse_limiar_99:.1f}).")
+                    st.caption(f"**Nota Analítica (Limiares de Verossimilhança):** Corte 68% (SSE \u2264 {sse_limiar_68:.1f}) | Corte 95% (SSE \u2264 {sse_limiar_95:.1f}) | Corte 99% (SSE \u2264 {sse_limiar_99:.1f}).")
 
-                # Inicializa S1 e ST vazios
+                # Inicializa S1, ST, e percentis vazios
                 S1 = [0.0, 0.0, 0.0]
                 ST = [0.0, 0.0, 0.0]
+                P_90 = P_50 = P_10 = 0.0
 
-                # --- 4. SOBOL VETORIZADO COM QoI OPERACIONAL (AOF) ---
+                # --- 4. SOBOL VETORIZADO E CÁLCULO DE P10/P50/P90 (QoI = Produtividade Global) ---
                 if ativar_termico:
                     st.markdown("---")
-                    st.subheader(f"🌪️ Análise de Sensibilidade Global do Campo Térmico (\u00B1{var_sobol_pct}%)")
+                    st.subheader(f"🌪️ Risco e Sensibilidade Estocástica do Campo Térmico (\u00B1{var_sobol_pct}%)")
                     
-                    with st.spinner("Avaliando propagação estocástica via Operações Tensoriais (Fast Sobol)..."):
+                    with st.spinner("Integrando a Produtividade Global em matriz tensorial via Fast Saltelli (N=2048)..."):
                         delta = var_sobol_pct / 100.0
                         
                         bounds_t_res = [max(0.1, t_res * (1.0 - delta)), t_res * (1.0 + delta)]
@@ -443,26 +477,52 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                             'bounds': [bounds_t_res, bounds_t_ref, bounds_ea_r]
                         }
                         
-                        param_values = sobol_sample.sample(problem, 1024)
+                        # Resolução científica dobrada: 2048 amostras geram ~16.384 avaliações simuladas
+                        param_values = sobol_sample.sample(problem, 2048)
                         
                         t_res_s = param_values[:, 0]
                         t_ref_s = param_values[:, 1]
                         ea_r_s  = param_values[:, 2]
 
-                        # VETORIZAÇÃO PURA: As mais de 8000 amostras processadas instantaneamente
+                        # VETORIZAÇÃO PURA (Gargalo Eliminado)
                         j_pert_arr = CorretorTermico.ajustar_indice_J(res_calibracao.J_calibrado, t_res_s, t_ref_s, ea_r_s)
                         
-                        if is_fetkovich:
-                            psat_pert_arr = np.full_like(t_res_s, res_calibracao.Psat_calibrado)
-                            q_output_tensorial = ModelosIPR.fetkovich(0.0, pe_campo, j_pert_arr, psat_pert_arr)
-                        else:
-                            # Correlação rigorosa inserida no tensor probabilístico
-                            psat_pert_arr = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res_s, t_ref_s, correlacao_pvt)
-                            q_output_tensorial = ModelosIPR.hibrido_darcy_vogel(0.0, pe_campo, psat_pert_arr, j_pert_arr)
-                            
-                        # Extração dos Índices sobre o Output Tensorial Instantâneo
-                        Si = sobol.analyze(problem, q_output_tensorial)
+                        pwf_frac = np.linspace(0, 1, 50)
+                        pwf_array_fixo = pe_campo * pwf_frac
                         
+                        pwf_brd = pwf_array_fixo[np.newaxis, :]  # Shape (1, 50)
+                        j_brd = j_pert_arr[:, np.newaxis]        # Shape (16384, 1)
+                        
+                        if is_fetkovich:
+                            psat_brd = np.full_like(j_brd, res_calibracao.Psat_calibrado)
+                            q_tensor = ModelosIPR.fetkovich(pwf_brd, pe_campo, j_brd, psat_brd)
+                        else:
+                            psat_pert_arr = CorretorTermico.ajustar_Psat(res_calibracao.Psat_calibrado, t_res_s, t_ref_s, correlacao_pvt)
+                            psat_brd = psat_pert_arr[:, np.newaxis]
+                            q_tensor = ModelosIPR.hibrido_darcy_vogel(pwf_brd, pe_campo, psat_brd, j_brd)
+                            
+                        # Integral Vetorizada: QoI = Média Global da Curva (Integral q dPwf / Pe)
+                        try:
+                            integral_q = np.trapezoid(q_tensor, pwf_array_fixo, axis=1)
+                        except AttributeError:
+                            integral_q = np.trapz(q_tensor, pwf_array_fixo, axis=1)
+                            
+                        # Vetor de Produtividade Global em (Unidade de Vazão)
+                        q_output_tensorial = (integral_q / pe_campo) * fator_conv
+                        
+                        # --- Extração Estocástica de Reservatórios (P90, P50, P10) ---
+                        # P90 é pessimista (10º percentil), P10 é otimista (90º percentil)
+                        P_90 = np.percentile(q_output_tensorial, 10)
+                        P_50 = np.percentile(q_output_tensorial, 50)
+                        P_10 = np.percentile(q_output_tensorial, 90)
+
+                        c_p10, c_p50, c_p90 = st.columns(3)
+                        c_p90.metric("Produtividade P90 (Pessimista)", f"{P_90:.0f} {unidade_vazao}")
+                        c_p50.metric("Produtividade P50 (Base/Mediana)", f"{P_50:.0f} {unidade_vazao}")
+                        c_p10.metric("Produtividade P10 (Otimista)", f"{P_10:.0f} {unidade_vazao}")
+                        
+                        # Extração dos Índices Sobol
+                        Si = sobol.analyze(problem, q_output_tensorial)
                         S1 = Si['S1']
                         ST = Si['ST']
                         
@@ -478,8 +538,8 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         fig_sobol.add_trace(go.Bar(y=labels_tornado, x=st_plot, orientation='h', name='ST (Impacto Total c/ Interação)', marker_color='#e53e3e'))
 
                         fig_sobol.update_layout(
-                            title=f"Decomposição da Variância do AOF Térmico (Janela \u00B1{var_sobol_pct}%)",
-                            xaxis_title="Índice de Sobol (Fração da Incerteza do AOF Explicada)",
+                            title=f"Decomposição de Variância da Produtividade Média Global (\u222bq)",
+                            xaxis_title="Índice de Sobol (Fração da Incerteza Explicada)",
                             barmode='group', height=400
                         )
                         st.plotly_chart(fig_sobol, use_container_width=True)
@@ -487,9 +547,9 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         idx_max_s1 = np.argmax(S1)
                         nome_max = problem['names'][idx_max_s1]
                         
-                        st.caption(f"**Análise da Dissertação (Vetorizada e Focada no AOF):** O *Quantity of Interest* utilizado foi o **Potencial Máximo Absoluto (AOF)**, refletindo o cenário operacional industrial. Através de operações tensoriais extremas, {len(q_output_tensorial)} predições térmicas foram processadas. O resultado atesta que **{nome_max}** comanda **{S1[idx_max_s1]*100:.1f}%** do comportamento máximo do poço sob incerteza térmica.")
+                        st.caption(f"**Análise da Dissertação (Vetorização Extrema e QoI Global):** O *Quantity of Interest* utilizado foi a **Produtividade Média Global da Curva** ($\\bar{{q}}$). Foram extraídas {len(q_output_tensorial)} simulações sem gargalo de software. O resultado atesta estatisticamente que **{nome_max}** comanda **{S1[idx_max_s1]*100:.1f}%** do comportamento global do poço sob incerteza térmica ($\\pm{var_sobol_pct}\\%$).")
                 else:
-                    st.info("Ative o 'Acoplamento Forward' na barra lateral para habilitar a Análise de Sobol do campo térmico.")
+                    st.info("Ative o 'Acoplamento Forward' na barra lateral para habilitar a Análise de Risco (P10/50/90) e o Sobol do campo térmico.")
 
                 # --- EXPORTAÇÃO BLINDADA EM LATEX ---
                 st.markdown("---")
@@ -500,6 +560,8 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                 str_pe = f"{pe_campo:.2f}"
                 str_rmse = f"{res_calibracao.rmse * fator_conv:.2f}"
                 str_r2 = f"{res_calibracao.r2:.4f}"
+                str_aic = f"{res_calibracao.aic:.2f}"
+                str_mape = f"{res_calibracao.mape:.2f}"
                 str_aof = f"{aof_plot:.2f}"
                 
                 tex_base = f"""\\documentclass{{article}}
@@ -510,10 +572,12 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 
 \\section*{{Memorial F\\'isico-Estat\\'istico - Po\\c{{c}}o: {well_name}}}
 
-\\subsection*{{1. Formula\\c{{c}}\\~ao do Problema Inverso OLS}}
+\\subsection*{{1. Sele\\c{{c}}\\~ao de Modelo e Problema Inverso (OLS)}}
 \\begin{{itemize}}
   \\item Coeficiente de Determina\\c{{c}}\\~ao ($R^2$): {str_r2}
   \\item RMSE Residual do Truncamento: {str_rmse} {unidade_vazao}
+  \\item MAPE: {str_mape}\\%
+  \\item Crit\\'erio de Informa\\c{{c}}\\~ao (AIC): {str_aic}
   \\item Parametro 1 (J/C) Convergido: {str_j}
   \\item Parametro 2 (Psat/n) Convergido: {str_p}
 \\end{{itemize}}
@@ -522,23 +586,27 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
 
                 if ativar_termico:
                     str_aof_t = f"{(aof_termico * fator_conv):.2f}"
-                    str_mult = f"{(j_termico/res_calibracao.J_calibrado):.4f}"
+                    str_mult = f"{(CorretorTermico.calcular_razao_viscosidade(t_res, t_ref, ea_r)):.4f}"
                     str_psat_t = f"{psat_termica:.2f}"
                     str_delta = f"{((aof_termico - aof_base) * fator_conv):+.2f}"
-                    tex_termico = f"""\\subsection*{{2. Forward Preditivo Termodin\\^amico de Arrhenius}}
+                    
+                    tex_termico = f"""\\subsection*{{2. Forward Preditivo Termodin\\^amico Rigoroso}}
 \\begin{{itemize}}
   \\item Delta de Temperatura: {t_ref}C a {t_res}C
   \\item Raz\\~ao Aparente Constante F\\'isica (Ea/R): {ea_r} K
-  \\item Correla\\c{{c}}\\~ao PVT Acoplada: {correlacao_pvt}
-  \\item Tensor Exponencial de Fluxo (J): {str_mult}
+  \\item Correla\\c{{c}}\\~ao PVT Expandida: {correlacao_pvt}
+  \\item Raz\\~ao de Viscosidade Termodin\\^amica: {str_mult}
   \\item Psat Corrigida Termicamente: {str_psat_t} psi
   \\item AOF Base: {str_aof} {unidade_vazao}
   \\item AOF T\\'ermico: {str_aof_t} {unidade_vazao}
   \\item Delta AOF Absoluto: {str_delta} {unidade_vazao}
 \\end{{itemize}}
 
-\\subsection*{{3. Sensibilidade Global Termodin\\^amica Operacional (Janela Estoc\\'astica $\\pm{var_sobol_pct}\\%, QoI: AOF$)}}
+\\subsection*{{3. An\\'alise de Risco Estoc\\'astica e Sobol (Janela $\\pm{var_sobol_pct}\\%, QoI: \\bar{{q}}$)}}
 \\begin{{itemize}}
+  \\item P90 (Reserva Conservadora): {P_90:.0f} {unidade_vazao}
+  \\item P50 (Reserva Mediana): {P_50:.0f} {unidade_vazao}
+  \\item P10 (Reserva Otimista): {P_10:.0f} {unidade_vazao}
   \\item $S_1$ (Temp. Reservatorio): {S1[0]:.4f} | $S_T$: {ST[0]:.4f}
   \\item $S_1$ (Temp. Referencia): {S1[1]:.4f} | $S_T$: {ST[1]:.4f}
   \\item $S_1$ (Razao Ea/R): {S1[2]:.4f} | $S_T$: {ST[2]:.4f}
@@ -558,8 +626,12 @@ AOF estabilizado: {str_aof} {unidade_vazao}.
                 with col_btn1:
                     st.download_button(label="🖩 Baixar Memorial LaTeX", data=latex_content, file_name=f"memorial_{well_name}.tex")
                 with col_btn2:
-                    df_rel = pd.DataFrame({"Parâmetro": ["Poço", "RMSE", "R2", "AOF Base", "AOF Térmico", "Sobol S1(T_res)", "Sobol S1(T_ref)", "Sobol S1(Ea_R)"],
-                                           "Valor": [well_name, str_rmse, str_r2, str_aof, f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-", f"{S1[0]:.4f}" if ativar_termico else "-", f"{S1[1]:.4f}" if ativar_termico else "-", f"{S1[2]:.4f}" if ativar_termico else "-"]})
+                    df_rel = pd.DataFrame({
+                        "Parâmetro": ["Poço", "RMSE", "R2", "AIC", "MAPE", "AOF Base", "AOF Térmico", "P90", "P50", "P10"],
+                        "Valor": [well_name, str_rmse, str_r2, str_aic, str_mape, str_aof, 
+                                  f"{(aof_termico * fator_conv):.1f}" if ativar_termico else "-",
+                                  f"{P_90:.1f}" if ativar_termico else "-", f"{P_50:.1f}" if ativar_termico else "-", f"{P_10:.1f}" if ativar_termico else "-"]
+                    })
                     st.download_button(label="📄 Baixar Tensor Numérico CSV", data=df_rel.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"dados_{well_name}.csv", mime="text/csv")
 
             except Exception as e:
