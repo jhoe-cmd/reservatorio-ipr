@@ -101,7 +101,9 @@ class CorretorTermico:
             c = 1.7669 - np.log10(psat_base)
             delta = b**2 - 4*a*c
             # Trava matemática blindada contra falha não-física da correlação
-            delta_safe = np.where(delta < 0, 0, delta)
+        if np.any(delta < 0):
+            print("AVISO: Correlação Glaso fora do domínio físico.")
+            delta_safe = np.maximum(delta, 0)
             x_ref = (-b + np.sqrt(delta_safe)) / (2 * a)
             
             x_res = x_ref + 0.172 * np.log10(t_res_f / t_ref_f)
@@ -136,7 +138,7 @@ class HistoryMatchingService:
             def res_func(p):
                 return ModelosIPR.fetkovich(pwf_medidos, Pe, p[0], p[1]) - q_medidos
                 
-            opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 0.5], [np.inf, 1.5]), method='trf')
+            opt = least_squares(res_func, [p1_start, p2_start], bounds=([1e-6, 0.2], [np.inf, 2]), method='trf')
             res.J_calibrado, res.Psat_calibrado = opt.x
             
         else:
@@ -169,8 +171,8 @@ class HistoryMatchingService:
         res.rmse = np.sqrt(ss_res / N)
         res.r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
         
-        q_safe = np.where(q_medidos == 0, 1e-6, q_medidos)
-        res.mape = np.mean(np.abs(opt.fun / q_safe)) * 100.0
+        res.wmape = (np.sum(np.abs(opt.fun))/np.sum(np.abs(q_medidos))) * 100
+        
         
         res.aic = N * np.log(ss_res / N) + 2 * res.k_params
         if N - res.k_params - 1 > 0:
@@ -287,7 +289,7 @@ is_fetkovich = (modelo_escolhido == "Fetkovich")
 
 if is_fetkovich:
     param1_guess = st.sidebar.number_input("Chute C (Coeficiente)", value=0.001, format="%.5f")
-    param2_guess = st.sidebar.number_input("Chute n (Expoente)", value=0.8, min_value=0.5, max_value=1.5)
+    param2_guess = st.sidebar.number_input("Chute n (Expoente)", value=0.8, min_value=0.2, max_value=2)
     param2_conhecido = None
     travar_psat = False
 else:
@@ -367,7 +369,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     st.warning("⚠️ R² negativo: o modelo ajusta pior que uma simples média dos dados.")
                 
                 c_aic1, c_aic2, c_aic3 = st.columns(3)
-                c_aic1.metric("MAPE (Erro Médio %)", f"{res_calibracao.mape:.2f}%")
+                c_aic1.metric("WMAPE",f"{res_calibracao.wmape:.2f}%")
                 c_aic2.metric("AIC (Akaike)", f"{res_calibracao.aic:.2f}")
                 val_aicc = f"{res_calibracao.aicc:.2f}" if not np.isnan(res_calibracao.aicc) else "N/A"
                 c_aic3.metric("AICc (Corrigido)", val_aicc)
@@ -484,7 +486,8 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     eigvals, eigvecs = np.linalg.eigh(res_calibracao.cov_mat)
                     
                     # Cálculo da Elipse 95% exata (via distribuição qui-quadrado para 2 gl)
-                    chi2_val = stats.chi2.ppf(0.95, 2)
+                    f95 = stats.f.ppf(0.95,dfn=2,dfd=max(1, N_dados-2))
+                    chi2_val = 2 * f95
                     t_ang = np.linspace(0, 2*np.pi, 100)
                     circle = np.vstack((np.cos(t_ang), np.sin(t_ang)))
                     transform = eigvecs @ np.diag(np.sqrt(np.maximum(eigvals * chi2_val, 0)))
@@ -494,7 +497,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                     y_ell = res_calibracao.Psat_calibrado + ellipse[1, :]
                     
                     fig_2d = go.Figure()
-                    fig_2d.add_trace(go.Contour(z=np.log10(sse_grid+1), x=j_grid[:,0], y=psat_grid[0,:], colorscale='Blues', opacity=0.6, name='Log(SSE) Global'))
+                    fig_2d.add_trace(go.Contour(z=np.log10(sse_grid - sse_min + 1), x=j_grid[:,0], y=psat_grid[0,:], colorscale='Blues', opacity=0.6, name='Log(SSE) Global'))
                     fig_2d.add_trace(go.Scatter(x=x_ell, y=y_ell, mode='lines', line=dict(color='red', width=2), name='Elipse de Covariância 95%'))
                     fig_2d.add_trace(go.Scatter(x=[res_calibracao.J_calibrado], y=[res_calibracao.Psat_calibrado], mode='markers', marker=dict(color='red', size=8, symbol='x'), name='Ótimo Local'))
                     
@@ -536,6 +539,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         }
                         
                         param_values = sobol_sample.sample(problem, 2048)
+                        st.info(f"Amostras efetivas Sobol: {len(param_values):,}")
                         
                         t_res_s = param_values[:, 0]
                         t_ref_s = param_values[:, 1]
@@ -599,6 +603,7 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         nome_max = problem['names'][idx_max_s1]
                         
                         st.caption(f"**Análise da Dissertação (Vetorização Tensorial):** O *Quantity of Interest (QoI)* utilizado foi o **Potencial Máximo Operacional (AOF)**, blindado contra artefatos de escala. Avaliadas {len(q_output_tensorial)} simulações paramétricas simultâneas. O indicador global atesta que **{nome_max}** comanda isoladamente **{S1[idx_max_s1]*100:.1f}%** do desvio padrão esperado da capacidade de entrega térmica.")
+                        st.info("""Modelo térmico semi-acoplado: a temperatura altera J e Psat, mas Pe é mantida constante. Os resultados representam sensibilidade relativa e não simulação PVT totalmente acoplada.""")
                 else:
                     st.info("Ative o 'Acoplamento Forward' na barra lateral para habilitar a Análise de Risco (P10/50/90) e o Sobol do campo térmico.")
 
