@@ -179,6 +179,7 @@ class HistoryMatchingService:
         res.mape = np.mean(np.abs(opt.fun / q_safe)) * 100.0
         
         # Critério de Informação de Akaike (Seleção de Modelos)
+        ss_res = max(ss_res, 1e-12)
         res.aic = N * np.log(ss_res / N) + 2 * k_params
         if N - k_params - 1 > 0:
             res.aicc = res.aic + (2 * k_params * (k_params + 1)) / (N - k_params - 1)
