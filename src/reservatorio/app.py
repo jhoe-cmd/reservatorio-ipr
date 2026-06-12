@@ -564,6 +564,13 @@ if st.sidebar.button("Rodar Framework Analítico", type="primary") and salib_dis
                         c_p10.metric("AOF Térmico P10 (Otimista)", f"{P_10:.0f} {unidade_vazao}")
                         
                         # Extração dos Índices Sobol sobre o Tensor Instantâneo
+                        mask_valid = np.isfinite(q_output_tensorial)
+
+                        if np.sum(mask_valid) < len(q_output_tensorial):
+                            st.warning(f"⚠️ {len(q_output_tensorial)-np.sum(mask_valid)} amostras inválidas removidas da análise Sobol.")
+
+                            q_output_tensorial = q_output_tensorial[mask_valid]
+
                         Si = sobol.analyze(problem, q_output_tensorial)
                         S1 = Si['S1']
                         ST = Si['ST']
