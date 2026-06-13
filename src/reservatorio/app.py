@@ -346,7 +346,7 @@ if not salib_disponivel:
     st.error("⚠️ Biblioteca SALib não encontrada. O gráfico de Sobol falhará. Execute no terminal: pip install SALib")
 
 st.title("🛢️ Simulador IPR - Forward Thermal Screening")
-st.markdown("Framework Científico por Marcio (PPGEC): Análise de Resíduos, Identificabilidade Bayesiana/Frequencista, Termodinâmica Semi-Acoplada e Propagação Sobol.")
+st.markdown("Framework Científico por Marcio (PPGEC - UFAL): Análise de Resíduos, Identificabilidade Bayesiana/Frequencista, Termodinâmica Semi-Acoplada e Propagação Sobol.")
 
 st.sidebar.header("📚 Carregar Cenário Experimental")
 cenario_escolhido = st.sidebar.selectbox("Preset:", list(PRESETS_POCOS.keys()))
