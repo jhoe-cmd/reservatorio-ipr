@@ -656,7 +656,7 @@ if st.sidebar.button("Rodar Framework Científico", type="primary") and salib_di
                         }
                         
                         param_values = sobol_sample.sample(problem, n_sobol)
-                        st.info(f"Amostras efetivas da matriz Sobol-Saltelli: {len(param_values):,}")
+                        st.info(f"Amostras efetivas da matriz Sobol-Saltelli geradas para avaliação: {len(param_values):,}")
                         
                         t_res_s = param_values[:, 0]
                         t_ref_s = param_values[:, 1]
